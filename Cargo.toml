@@ -1,6 +1,6 @@
 [package]
 name = "trezor-connect-rs"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 repository = "https://github.com/coreyphillips/trezor-connect-rs"
 description = "A Rust library for interacting with Trezor hardware wallets via Trezor Connect"

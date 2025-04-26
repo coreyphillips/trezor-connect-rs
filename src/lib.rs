@@ -3,10 +3,11 @@ use serde_json::{json, Value};
 use crate::errors::HardwareError;
 use crate::types::{AddressInfo, PublicKeyInfo, TrezorClient, TrezorDeviceFeatures, TrezorResponse};
 
-mod errors;
-mod types;
+pub mod errors;
+pub mod types;
+
 impl TrezorClient {
-    fn new() -> Result<Self, HardwareError> {
+    pub fn new() -> Result<Self, HardwareError> {
         let js_content = include_str!("../functions-with-trezor.js");
         let temp_dir = tempfile::tempdir()
             .map_err(|e| HardwareError::IoError { error_details: e.to_string() })?;
@@ -42,7 +43,7 @@ impl TrezorClient {
         Ok(TrezorClient { process, reader })
     }
 
-    fn send_command(&mut self, command_obj: Value) -> Result<Value, HardwareError> {
+    pub fn send_command(&mut self, command_obj: Value) -> Result<Value, HardwareError> {
         let command_str = command_obj.to_string();
 
         // Send command to the script via stdin
@@ -78,21 +79,21 @@ impl TrezorClient {
         Ok(v)
     }
 
-    fn init(&mut self) -> Result<TrezorResponse<()>, HardwareError> {
+    pub fn init(&mut self) -> Result<TrezorResponse<()>, HardwareError> {
         let response = self.send_command(json!({ "command": "init" }))?;
         let typed_response: TrezorResponse<()> = serde_json::from_value(response)
             .map_err(|e| HardwareError::JsonError { error_details: e.to_string() })?;
         Ok(typed_response)
     }
 
-    fn get_features(&mut self) -> Result<TrezorResponse<TrezorDeviceFeatures>, HardwareError> {
+    pub fn get_features(&mut self) -> Result<TrezorResponse<TrezorDeviceFeatures>, HardwareError> {
         let response = self.send_command(json!({ "command": "getFeatures" }))?;
         let typed_response: TrezorResponse<TrezorDeviceFeatures> = serde_json::from_value(response)
             .map_err(|e| HardwareError::JsonError { error_details: e.to_string() })?;
         Ok(typed_response)
     }
 
-    fn get_public_key(&mut self, path: &str, coin: &str) -> Result<TrezorResponse<PublicKeyInfo>, HardwareError> {
+    pub fn get_public_key(&mut self, path: &str, coin: &str) -> Result<TrezorResponse<PublicKeyInfo>, HardwareError> {
         let response = self.send_command(json!({
             "command": "getpk",
             "path": path,
@@ -103,7 +104,7 @@ impl TrezorClient {
         Ok(typed_response)
     }
 
-    fn get_address(&mut self, path: &str, coin: &str, show_on_trezor: bool) -> Result<TrezorResponse<AddressInfo>, HardwareError> {
+    pub fn get_address(&mut self, path: &str, coin: &str, show_on_trezor: bool) -> Result<TrezorResponse<AddressInfo>, HardwareError> {
         let response = self.send_command(json!({
             "command": "getaddr",
             "path": path,
@@ -115,7 +116,7 @@ impl TrezorClient {
         Ok(typed_response)
     }
 
-    fn exit(&mut self) -> Result<TrezorResponse<()>, HardwareError> {
+    pub fn exit(&mut self) -> Result<TrezorResponse<()>, HardwareError> {
         let response = self.send_command(json!({ "command": "exit" }))?;
         let typed_response: TrezorResponse<()> = serde_json::from_value(response)
             .map_err(|e| HardwareError::JsonError { error_details: e.to_string() })?;
