@@ -26,7 +26,7 @@ Add this crate to your Cargo.toml:
 
 ```toml
 [dependencies]
-trezor-client = "0.1.0"  # Replace with actual version
+trezor-connect-rs = "0.1.1"
 ```
 
 Make sure the `functions-with-trezor.js` Deno script is available in your project directory.
@@ -36,7 +36,7 @@ Make sure the `functions-with-trezor.js` Deno script is available in your projec
 ### Basic Example
 
 ```rust
-use trezor_client::{initialize, TrezorClient};
+use trezor_connect_rs::{initialize, TrezorClient};
 
 fn main() {
     // Initialize the Trezor library
