@@ -2,6 +2,11 @@
 name = "trezor-connect-rs"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/coreyphillips/trezor-connect-rs"
+description = "A Rust library for interacting with Trezor hardware wallets via Trezor Connect"
+authors = ["Corey Phillips"]
+keywords = ["trezor", "wallet", "bitcoin", "hardware-wallet"]
+license = "MIT"
 
 [dependencies]
 serde_json = "1.0.140"
