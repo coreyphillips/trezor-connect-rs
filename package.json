@@ -1,0 +1,14 @@
+{
+  "name": "trezor-connect-rs",
+  "version": "1.0.0",
+  "description": "",
+  "main": "functions-with-trezor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "bundle": "npx esbuild functions-with-trezor.js \\\n  --bundle \\\n  --platform=node \\\n  --format=cjs \\\n  --outfile=bundle.js\n"
+  },
+  "private": false,
+  "dependencies": {
+    "@trezor/connect": "^9.5.4"
+  }
+}

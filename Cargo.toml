@@ -1,0 +1,9 @@
+[package]
+name = "trezor-connect-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1.0.140"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.12"
