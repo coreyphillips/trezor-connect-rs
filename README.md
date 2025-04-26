@@ -26,7 +26,7 @@ Add this crate to your Cargo.toml:
 
 ```toml
 [dependencies]
-trezor-connect-rs = "0.1.1"
+trezor-connect-rs = "0.1.2"
 ```
 
 Make sure the `functions-with-trezor.js` Deno script is available in your project directory.

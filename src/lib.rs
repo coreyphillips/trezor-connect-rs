@@ -7,6 +7,14 @@ mod errors;
 mod types;
 impl TrezorClient {
     fn new() -> Result<Self, HardwareError> {
+        let js_content = include_str!("../functions-with-trezor.js");
+        let temp_dir = tempfile::tempdir()
+            .map_err(|e| HardwareError::IoError { error_details: e.to_string() })?;
+        let js_file_path = temp_dir.path().join("functions-with-trezor.js");
+
+        std::fs::write(&js_file_path, js_content)
+            .map_err(|e| HardwareError::IoError { error_details: e.to_string() })?;
+
         // Start the Deno script as a persistent process
         let mut process = Command::new("deno")
             .arg("run")
@@ -19,7 +27,7 @@ impl TrezorClient {
             .arg("--allow-write")
             .arg("--allow-scripts=npm:blake-hash@2.0.0,npm:tiny-secp256k1@1.1.7,npm:protobufjs@7.4.0,npm:usb@2.15.0")
             .arg("--node-modules-dir")
-            .arg("functions-with-trezor.js")
+            .arg(js_file_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
