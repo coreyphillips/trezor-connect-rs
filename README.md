@@ -1,208 +1,267 @@
-# Trezor Hardware Wallet Integration
+# trezor-connect-rs
 
-This Rust library allows for interacting with Trezor hardware wallets through a Deno bridge script.
+A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Supports USB and Bluetooth connectivity.
 
 ## Features
 
-- Initialize connection to Trezor devices
-- Retrieve device features and information
-- Get public keys for specific derivation paths
-- Get addresses for specific derivation paths
-- Properly handle device connection and disconnection
+- **USB** (Protocol v1) - Trezor Safe 5, Safe 3, Model T, Model One
+- **Bluetooth** (THP v2, Noise XX encrypted) - Trezor Safe 7
+- **Bitcoin operations** - address generation, transaction signing, message signing/verification, xpub derivation
+- **Credential persistence** - file-based or OS keychain, for skipping Bluetooth re-pairing
 
 ## Requirements
 
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Deno](https://deno.land/#installation)
-- Node.js modules:
-    - blake-hash@2.0.0
-    - tiny-secp256k1@1.1.7
-    - protobufjs@7.4.0
-    - usb@2.15.0
+- Tokio async runtime
+- USB: libusb (or platform equivalent)
+- Bluetooth: platform BLE support (btleplug)
 
 ## Installation
 
-Add this crate to your Cargo.toml:
-
 ```toml
 [dependencies]
-trezor-connect-rs = "0.1.2"
+trezor-connect-rs = "0.2"
 ```
 
-Make sure the `functions-with-trezor.js` Deno script is available in your project directory.
+### Feature Flags
 
-## Usage
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `usb` | Yes | USB transport via libusb |
+| `bluetooth` | Yes | Bluetooth transport via btleplug |
+| `os-keychain` | No | OS-native credential storage (macOS Keychain, Windows Credential Manager, Linux Secret Service) |
 
-### Basic Example
+```toml
+# Default: USB + Bluetooth
+trezor-connect-rs = "0.2"
+
+# USB only (e.g., for iOS where libusb isn't available)
+trezor-connect-rs = { version = "0.2", default-features = false, features = ["usb"] }
+
+# Bluetooth only
+trezor-connect-rs = { version = "0.2", default-features = false, features = ["bluetooth"] }
+
+# With OS keychain for credential storage
+trezor-connect-rs = { version = "0.2", features = ["os-keychain"] }
+```
+
+## Quick Start
 
 ```rust
-use trezor_connect_rs::{initialize, TrezorClient};
+use trezor_connect_rs::{Trezor, GetAddressParams};
 
-fn main() {
-    // Initialize the Trezor library
-    match initialize() {
-        Ok(message) => println!("Success: {}", message),
-        Err(e) => eprintln!("Error: {:?}", e)
+#[tokio::main]
+async fn main() -> trezor_connect_rs::Result<()> {
+    let mut trezor = Trezor::new()
+        .with_credential_store("~/.trezor-credentials.json")
+        .build()
+        .await?;
+
+    // Scan for USB and Bluetooth devices
+    let devices = trezor.scan().await?;
+    if devices.is_empty() {
+        println!("No devices found");
+        return Ok(());
     }
-    
-    // Create a client to interact with the device
-    let mut trezor = match TrezorClient::new() {
-        Ok(client) => client,
-        Err(e) => {
-            eprintln!("Could not create Trezor client: {:?}", e);
-            return;
-        }
-    };
-    
-    // Initialize the connection
-    if let Err(e) = trezor.init() {
-        eprintln!("Initialization error: {:?}", e);
-        return;
-    }
-    
-    // Get device features
-    match trezor.get_features() {
-        Ok(features) => {
-            if features.success {
-                let device_info = features.payload.unwrap();
-                println!("Connected to: {} ({})", device_info.model, device_info.device_id);
-            } else {
-                eprintln!("Failed to get features: {:?}", features.error);
-            }
-        },
-        Err(e) => eprintln!("Error getting features: {:?}", e)
-    }
-    
-    // Get a Bitcoin address (replace with your desired derivation path)
-    let address_response = trezor.get_address("m/44'/0'/0'/0/0", "bitcoin", true);
-    if let Ok(addr_resp) = address_response {
-        if addr_resp.success {
-            println!("Address: {}", addr_resp.payload.unwrap().address);
-        }
-    }
-    
-    // Client will automatically close the connection when it goes out of scope
+
+    // Connect to the first device
+    let mut device = trezor.connect(&devices[0]).await?;
+    device.initialize().await?;
+
+    // Get a native SegWit address
+    let result = device.get_address(GetAddressParams {
+        path: "m/84'/0'/0'/0/0".into(),
+        show_on_trezor: true,
+        ..Default::default()
+    }).await?;
+
+    println!("Address: {}", result.address);
+
+    device.disconnect().await?;
+    Ok(())
 }
 ```
 
-### Working with Derivation Paths
+## API
 
-The library supports BIP-32 derivation paths for various cryptocurrencies:
+### Trezor (manager)
 
-```rust
-// Get Bitcoin address
-let btc_address = trezor.get_address("m/44'/0'/0'/0/0", "bitcoin", false);
-
-// Get Ethereum address
-let eth_address = trezor.get_address("m/44'/60'/0'/0/0", "ethereum", false);
-```
-
-### Displaying on Trezor
-
-To display the address on the Trezor device for verification:
+The entry point. Discovers devices across transports and manages connections.
 
 ```rust
-// The last parameter (true) will show the address on the Trezor display
-let safe_address = trezor.get_address("m/44'/0'/0'/0/0", "bitcoin", true);
+let mut trezor = Trezor::new()
+    .with_credential_store("/path/to/creds.json") // file-based credential persistence
+    // .with_keychain_store(None)                  // or OS keychain (requires "os-keychain" feature)
+    .usb_only()                                    // or .bluetooth_only()
+    .build()
+    .await?;
+
+let devices = trezor.scan().await?;           // active scan (triggers BLE discovery)
+let devices = trezor.list_devices().await?;    // list already-discovered devices
+let device = trezor.connect(&devices[0]).await?;
+trezor.clear_credentials("device-id").await?;  // remove stored pairing credentials
 ```
+
+### ConnectedDevice (operations)
+
+Returned by `trezor.connect()`. Provides Bitcoin operations on the connected device.
+
+```rust
+let features = device.initialize().await?;
+
+let addr = device.get_address(GetAddressParams {
+    path: "m/84'/0'/0'/0/0".into(),
+    show_on_trezor: false,
+    ..Default::default()
+}).await?;
+
+let pubkey = device.get_public_key(GetPublicKeyParams {
+    path: "m/84'/0'/0'".into(),
+    ..Default::default()
+}).await?;
+
+let signed = device.sign_message(SignMessageParams {
+    path: "m/84'/0'/0'/0/0".into(),
+    message: "Hello".into(),
+    ..Default::default()
+}).await?;
+
+let valid = device.verify_message(VerifyMessageParams {
+    address: signed.address,
+    signature: signed.signature,
+    message: "Hello".into(),
+    ..Default::default()
+}).await?;
+
+let tx = device.sign_transaction(SignTxParams {
+    inputs: vec![/* ... */],
+    outputs: vec![/* ... */],
+    ..Default::default()
+}).await?;
+
+device.disconnect().await?;
+```
+
+### Low-Level API
+
+For protocol-level access, use `TrezorClient` with a transport directly:
+
+```rust
+use trezor_connect_rs::{TrezorClient, UsbTransport, Transport};
+
+let mut transport = UsbTransport::new()?;
+transport.init().await?;
+
+let devices = transport.enumerate().await?;
+let mut client = TrezorClient::new(transport);
+client.acquire(&devices[0].path).await?;
+
+let features = client.initialize().await?;
+let address = client.get_address("m/84'/0'/0'/0/0", false).await?;
+
+client.release().await?;
+```
+
+## Credential Storage
+
+Bluetooth (THP) pairing produces cryptographic credentials that allow reconnection without re-pairing. Two storage backends are available:
+
+**File-based** (default, no extra feature):
+```rust
+Trezor::new()
+    .with_credential_store("~/.trezor-credentials.json")
+```
+Stores credentials as JSON with `0600` file permissions on Unix.
+
+**OS keychain** (requires `os-keychain` feature):
+```rust
+Trezor::new()
+    .with_keychain_store(None) // uses default "trezor-connect" service name
+```
+Uses macOS Keychain, Windows Credential Manager, or Linux Secret Service. Credentials are encrypted at rest by the OS.
+
+If neither is configured, Bluetooth pairing is required on every connection.
 
 ## Error Handling
 
-All functions return a `Result` type that will contain either the successful response or a `HardwareError` with details about what went wrong.
-
-The library uses the `thiserror` crate to define the following error types:
+All operations return `trezor_connect_rs::Result<T>`, which wraps `TrezorError`:
 
 ```rust
-pub enum HardwareError {
-    // Failed to initialize the hardware wallet
-    InitializationError { error_details: String },
-    
-    // I/O errors during communication
-    IoError { error_details: String },
-    
-    // Error finding the executable directory
-    ExecutableDirectoryError,
-    
-    // Communication errors with the device
-    CommunicationError { error_details: String },
-    
-    // JSON serialization/deserialization errors
-    JsonError { error_details: String },
+use trezor_connect_rs::TrezorError;
+
+match result {
+    Err(TrezorError::Transport(e)) => println!("Connection failed: {}", e),
+    Err(TrezorError::Device(e))    => println!("Device error: {}", e),
+    Err(TrezorError::Thp(e))       => println!("THP/Bluetooth error: {}", e),
+    Err(TrezorError::Protocol(e))  => println!("Protocol error: {}", e),
+    Err(TrezorError::Session(e))   => println!("Session error: {}", e),
+    Err(TrezorError::Bitcoin(e))   => println!("Bitcoin error: {}", e),
+    Err(TrezorError::Cancelled)    => println!("Operation cancelled"),
+    Err(TrezorError::Timeout)      => println!("Operation timed out"),
+    Err(TrezorError::IoError(e))   => println!("I/O error: {}", e),
+    Ok(val) => { /* success */ }
 }
+```
 
-## Testing
-
-Basic tests are included:
+## Examples
 
 ```bash
-# Run standard tests
-cargo test
+# Recommended starting point - unified API with scanning, signing, verification
+cargo run --example simple_api
 
-# Run tests that require physical Trezor hardware
-cargo test -- --ignored
+# With OS keychain credential storage
+cargo run --example simple_api --features os-keychain
+
+# USB-specific examples (low-level TrezorClient API)
+cargo run --example get_address
+cargo run --example sign_message
+cargo run --example sign_transaction
+
+# Bluetooth low-level example (raw THP protocol, useful for debugging)
+cargo run --example bluetooth_connect
 ```
 
-## Data Structures
+| Example | Transport | API Level | Description |
+|---------|-----------|-----------|-------------|
+| `simple_api` | USB + BLE | High-level | Full demo: scan, connect, get address, sign/verify message |
+| `get_address` | USB | Low-level | Get a native SegWit address |
+| `sign_message` | USB | Low-level | Sign and verify a message |
+| `sign_transaction` | USB | Low-level | Sign a Bitcoin transaction |
+| `bluetooth_connect` | BLE | Low-level | Raw THP handshake, pairing, and encrypted messaging |
 
-### TrezorClient
-The main client struct that manages communication with the device:
-```rust
-pub struct TrezorClient {
-    pub(crate) process: Child,
-    pub(crate) reader: BufReader<std::process::ChildStdout>,
-}
+## Supported Devices
+
+| Device | Transport | Protocol |
+|--------|-----------|----------|
+| Trezor Safe 7 | Bluetooth | THP v2 (Noise XX encrypted) |
+| Trezor Safe 5 | USB | Protocol v1 |
+| Trezor Safe 3 | USB | Protocol v1 |
+| Trezor Model T | USB | Protocol v1 |
+| Trezor Model One | USB | Protocol v1 |
+
+## Project Structure
+
 ```
-
-### TrezorResponse<T>
-All API calls return a generic response structure:
-```rust
-pub struct TrezorResponse<T> {
-    pub id: u32,                            // Response ID
-    pub success: bool,                      // Success/failure indicator
-    pub payload: Option<T>,                 // Type-specific payload (when success is true)
-    pub error: Option<String>,              // Error message (when success is false)
-    pub message: Option<String>,            // Additional message
-    pub device: Option<DeviceInfo>,         // Information about the connected device
-}
+src/
+├── lib.rs                # Library entry, re-exports
+├── trezor.rs             # High-level manager (Trezor, TrezorBuilder)
+├── connected_device.rs   # Connected device API (get_address, sign_tx, etc.)
+├── credential_store.rs   # Credential persistence (file + OS keychain)
+├── device_info.rs        # Device metadata (USB/BLE, model, path)
+├── params.rs             # API parameter types
+├── responses.rs          # API response types
+├── error.rs              # Error definitions
+├── transport/            # Transport layer
+│   ├── usb.rs            #   USB transport (Protocol v1)
+│   ├── bluetooth.rs      #   Bluetooth transport (THP v2)
+│   ├── callback.rs       #   Callback-based transport (for FFI)
+│   └── session.rs        #   Session management
+├── protocol/             # Wire protocol encoding/decoding
+│   ├── v1/               #   Protocol v1 (USB)
+│   └── thp/              #   THP v2 (handshake, crypto, pairing, state)
+├── device/               # Low-level TrezorClient, features, commands
+├── protos/               # Protobuf message definitions
+└── types/                # Bitcoin types, paths, networks
 ```
-
-### TrezorDeviceFeatures
-Contains detailed information about the connected Trezor device, including:
-- Device model and firmware version
-- Security settings (PIN/passphrase protection)
-- Device capabilities and state
-- Hardware information
-
-### AddressInfo
-Contains information about a derived address:
-```rust
-pub struct AddressInfo {
-    pub path: Vec<u32>,              // Numeric derivation path components
-    pub serializedPath: String,      // String representation of path (e.g., "m/44'/0'/0'/0/0")
-    pub address: String,             // The derived cryptocurrency address
-}
-```
-
-### PublicKeyInfo
-Contains extended public key information:
-```rust
-pub struct PublicKeyInfo {
-    pub path: Vec<u32>,              // Numeric derivation path components
-    pub serializedPath: String,      // String representation of path
-    pub childNum: u32,               // Child number in the derivation path
-    pub xpub: String,                // Extended public key (xpub format)
-    pub chainCode: String,           // Chain code for derivation
-    pub publicKey: String,           // Raw public key
-    pub fingerprint: u32,            // Parent fingerprint
-    pub depth: u8,                   // Derivation depth
-    pub descriptor: String,          // Output descriptor
-    pub xpubSegwit: Option<String>,  // Segwit extended public key (if applicable)
-}
-```
-
-## Architecture
-
-This library uses a Deno script (`functions-with-trezor.js`) as an intermediary between Rust and the Trezor device. Communication happens through stdin/stdout pipes with JSON-formatted messages.
 
 ## License
 
