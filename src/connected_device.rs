@@ -137,7 +137,7 @@ impl ConnectedDevice {
         let address_n = parse_path(&params.path)?;
         let script_type = params.script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_else(|| "Bitcoin".to_string());
+        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
         let request = protos::bitcoin::GetAddress {
             address_n: address_n.clone(),
@@ -179,7 +179,7 @@ impl ConnectedDevice {
         let address_n = parse_path(&params.path)?;
         let script_type = params.script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_else(|| "Bitcoin".to_string());
+        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
         let request = protos::bitcoin::GetPublicKey {
             address_n: address_n.clone(),
@@ -226,7 +226,7 @@ impl ConnectedDevice {
     pub async fn sign_message(&self, params: SignMessageParams) -> Result<SignedMessageResponse> {
         let address_n = parse_path(&params.path)?;
         let script_type = infer_script_type(&address_n);
-        let coin_name = params.coin.unwrap_or_else(|| "Bitcoin".to_string());
+        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
         let request = protos::bitcoin::SignMessage {
             address_n,
@@ -273,7 +273,7 @@ impl ConnectedDevice {
             .decode(&params.signature)
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid base64 signature: {}", e)))?;
 
-        let coin_name = params.coin.unwrap_or_else(|| "Bitcoin".to_string());
+        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
         let request = protos::bitcoin::VerifyMessage {
             address: params.address,
@@ -332,7 +332,7 @@ impl ConnectedDevice {
     /// println!("Signed TX: {}", signed.serialized_tx);
     /// ```
     pub async fn sign_transaction(&self, params: SignTxParams) -> Result<SignedTxResponse> {
-        let coin_name = params.coin.unwrap_or_else(|| "Bitcoin".to_string());
+        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
         let version = params.version.unwrap_or(2);
         let lock_time = params.lock_time.unwrap_or(0);
 
