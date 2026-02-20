@@ -18,12 +18,26 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use trezor_connect_rs::{Trezor, GetAddressParams};
+//! use std::sync::Arc;
+//! use trezor_connect_rs::{Trezor, GetAddressParams, TrezorUiCallback};
+//!
+//! /// Implement this trait to handle PIN/passphrase prompts from your UI.
+//! struct MyUiCallback;
+//! impl TrezorUiCallback for MyUiCallback {
+//!     fn on_pin_request(&self) -> Option<String> {
+//!         // Show PIN matrix UI, return the entered PIN or None to cancel
+//!         Some("123456".to_string())
+//!     }
+//!     fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+//!         if on_device { Some(String::new()) } else { Some(String::new()) }
+//!     }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> trezor_connect_rs::Result<()> {
 //!     let mut trezor = Trezor::new()
 //!         .with_credential_store("~/.trezor-credentials.json")
+//!         .with_ui_callback(Arc::new(MyUiCallback))
 //!         .build()
 //!         .await?;
 //!
@@ -90,6 +104,13 @@ pub mod params;
 pub mod responses;
 pub mod credential_store;
 
+// UI callback for PIN/passphrase input
+pub mod ui_callback;
+
+// PSBT support (optional, requires `psbt` feature)
+#[cfg(feature = "psbt")]
+pub mod psbt;
+
 // Re-export error types
 pub use error::{TrezorError, Result};
 
@@ -100,6 +121,7 @@ pub use device_info::{DeviceInfo, TransportType};
 pub use params::*;
 pub use responses::*;
 pub use credential_store::{CredentialStore, StoredCredential};
+pub use ui_callback::TrezorUiCallback;
 
 // Re-export low-level API for advanced users
 pub use device::TrezorClient;

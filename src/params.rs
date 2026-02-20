@@ -111,6 +111,10 @@ pub struct SignTxInput {
     pub script_type: ScriptType,
     /// Sequence number (default: 0xFFFFFFFD for RBF)
     pub sequence: Option<u32>,
+    /// Original transaction hash for RBF replacement (hex encoded)
+    pub orig_hash: Option<String>,
+    /// Original input index for RBF replacement
+    pub orig_index: Option<u32>,
 }
 
 /// Transaction output for signing.
@@ -126,6 +130,47 @@ pub struct SignTxOutput {
     pub script_type: Option<ScriptType>,
     /// OP_RETURN data (hex encoded, for data outputs)
     pub op_return_data: Option<String>,
+    /// Original transaction hash for RBF replacement (hex encoded)
+    pub orig_hash: Option<String>,
+    /// Original output index for RBF replacement
+    pub orig_index: Option<u32>,
+}
+
+/// Previous transaction data (for non-SegWit input verification).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignTxPrevTx {
+    /// Transaction hash (hex encoded)
+    pub hash: String,
+    /// Transaction version
+    pub version: u32,
+    /// Lock time
+    pub lock_time: u32,
+    /// Transaction inputs
+    pub inputs: Vec<SignTxPrevTxInput>,
+    /// Transaction outputs
+    pub outputs: Vec<SignTxPrevTxOutput>,
+}
+
+/// Input of a previous transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignTxPrevTxInput {
+    /// Previous transaction hash (hex encoded)
+    pub prev_hash: String,
+    /// Previous output index
+    pub prev_index: u32,
+    /// Script signature (hex encoded)
+    pub script_sig: String,
+    /// Sequence number
+    pub sequence: u32,
+}
+
+/// Output of a previous transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignTxPrevTxOutput {
+    /// Amount in satoshis
+    pub amount: u64,
+    /// Script pubkey (hex encoded)
+    pub script_pubkey: String,
 }
 
 /// Parameters for signing a transaction.
@@ -141,6 +186,8 @@ pub struct SignTxParams {
     pub lock_time: Option<u32>,
     /// Version (default: 2)
     pub version: Option<u32>,
+    /// Previous transactions (for non-SegWit input verification)
+    pub prev_txs: Vec<SignTxPrevTx>,
 }
 
 #[cfg(test)]

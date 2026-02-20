@@ -34,6 +34,8 @@ pub struct PublicKeyResponse {
     pub fingerprint: u32,
     /// Child number
     pub child_num: u32,
+    /// Master root fingerprint (from the device's master seed)
+    pub root_fingerprint: Option<u32>,
 }
 
 /// Response from sign_message.

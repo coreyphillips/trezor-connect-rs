@@ -19,6 +19,10 @@ pub struct TxInput {
     pub script_type: ScriptType,
     /// Sequence number (default: 0xFFFFFFFF)
     pub sequence: Option<u32>,
+    /// Original transaction hash for RBF replacement
+    pub orig_hash: Option<Vec<u8>>,
+    /// Original input index for RBF replacement
+    pub orig_index: Option<u32>,
 }
 
 impl TxInput {
@@ -33,6 +37,8 @@ impl TxInput {
             amount,
             script_type: ScriptType::SpendWitness,
             sequence: None,
+            orig_hash: None,
+            orig_index: None,
         }
     }
 
@@ -52,6 +58,10 @@ pub enum TxOutput {
         address: String,
         /// Amount in satoshis
         amount: u64,
+        /// Original transaction hash for RBF replacement
+        orig_hash: Option<Vec<u8>>,
+        /// Original output index for RBF replacement
+        orig_index: Option<u32>,
     },
     /// Change output (to own address)
     Change {
@@ -61,11 +71,19 @@ pub enum TxOutput {
         amount: u64,
         /// Script type
         script_type: ScriptType,
+        /// Original transaction hash for RBF replacement
+        orig_hash: Option<Vec<u8>>,
+        /// Original output index for RBF replacement
+        orig_index: Option<u32>,
     },
     /// OP_RETURN output
     OpReturn {
         /// Data to embed
         data: Vec<u8>,
+        /// Original transaction hash for RBF replacement
+        orig_hash: Option<Vec<u8>>,
+        /// Original output index for RBF replacement
+        orig_index: Option<u32>,
     },
 }
 
@@ -75,6 +93,8 @@ impl TxOutput {
         TxOutput::External {
             address: address.to_string(),
             amount,
+            orig_hash: None,
+            orig_index: None,
         }
     }
 
@@ -85,6 +105,8 @@ impl TxOutput {
             path: path_vec,
             amount,
             script_type: ScriptType::SpendWitness,
+            orig_hash: None,
+            orig_index: None,
         }
     }
 
@@ -92,6 +114,8 @@ impl TxOutput {
     pub fn op_return(data: &[u8]) -> Self {
         TxOutput::OpReturn {
             data: data.to_vec(),
+            orig_hash: None,
+            orig_index: None,
         }
     }
 }

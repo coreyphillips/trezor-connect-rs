@@ -1361,9 +1361,8 @@ impl TransportApi for BluetoothTransport {
                     props.services
                 );
 
-                // Check if this is a Trezor device by service UUID or name
-                let is_trezor = props.services.contains(&BLE_SERVICE_UUID)
-                    || name.to_lowercase().contains("trezor");
+                // Check if this is a Trezor device by service UUID
+                let is_trezor = props.services.contains(&BLE_SERVICE_UUID);
 
                 if is_trezor {
                     let path = peripheral.id().to_string();

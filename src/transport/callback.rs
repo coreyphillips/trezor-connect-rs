@@ -241,6 +241,8 @@ pub struct CallbackTransport {
     host_name: String,
     /// Application name for THP pairing identity
     app_name: String,
+    /// Cache of transport type from enumerate() (path -> is_bluetooth)
+    transport_type_cache: Arc<RwLock<HashMap<String, bool>>>,
 }
 
 impl CallbackTransport {
@@ -255,6 +257,7 @@ impl CallbackTransport {
             pairing_callback: None,
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
+            transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -269,6 +272,7 @@ impl CallbackTransport {
             pairing_callback: None,
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
+            transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -284,9 +288,19 @@ impl CallbackTransport {
         self
     }
 
-    /// Check if a path is a BLE device
-    fn is_ble_device(path: &str) -> bool {
+    /// Heuristic check if a path is a BLE device (fallback when cache misses)
+    fn is_ble_device_heuristic(path: &str) -> bool {
         path.starts_with("ble:") || path.contains("bluetooth")
+    }
+
+    /// Check if a path is a BLE device, using the enumerate() cache first
+    async fn is_ble_device(&self, path: &str) -> bool {
+        let cache = self.transport_type_cache.read().await;
+        if let Some(&is_ble) = cache.get(path) {
+            return is_ble;
+        }
+        drop(cache);
+        Self::is_ble_device_heuristic(path)
     }
 
     /// Write raw data to device (for THP handshake)
@@ -1386,6 +1400,14 @@ impl Transport for CallbackTransport {
     async fn enumerate(&self) -> Result<Vec<DeviceDescriptor>> {
         let devices = self.callback.enumerate_devices();
 
+        // Populate transport type cache from enumerated device info
+        {
+            let mut cache = self.transport_type_cache.write().await;
+            for d in &devices {
+                cache.insert(d.path.clone(), d.transport_type == "bluetooth");
+            }
+        }
+
         Ok(devices
             .into_iter()
             .map(|d| DeviceDescriptor {
@@ -1413,7 +1435,7 @@ impl Transport for CallbackTransport {
         }
 
         // For BLE devices, perform THP handshake
-        if Self::is_ble_device(path) {
+        if self.is_ble_device(path).await {
             let needs_handshake = {
                 let states = self.ble_states.read().await;
                 !states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
@@ -1456,7 +1478,7 @@ impl Transport for CallbackTransport {
             .ok_or(TransportError::DeviceNotFound)?;
 
         // For BLE devices, use THP encrypted messaging
-        if Self::is_ble_device(&path) {
+        if self.is_ble_device(&path).await {
             let is_paired = {
                 let states = self.ble_states.read().await;
                 states.get(&path).map(|s| s.protocol.state().is_paired()).unwrap_or(false)

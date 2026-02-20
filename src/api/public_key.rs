@@ -48,6 +48,8 @@ pub struct PublicKeyResponse {
     pub path: Vec<u32>,
     /// Serialized path
     pub serialized_path: String,
+    /// Master root fingerprint
+    pub root_fingerprint: Option<u32>,
 }
 
 /// Get public key from the device
@@ -63,5 +65,6 @@ pub async fn get_public_key(_params: GetPublicKeyParams) -> Result<PublicKeyResp
         child_num: 0x80000000,
         path: vec![84 | 0x80000000, 0x80000000, 0x80000000],
         serialized_path: "m/84'/0'/0'".to_string(),
+        root_fingerprint: None,
     })
 }

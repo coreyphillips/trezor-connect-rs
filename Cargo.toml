@@ -1,6 +1,6 @@
 [package]
 name = "trezor-connect-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/coreyphillips/trezor-connect-rs"
@@ -54,6 +54,9 @@ tracing = "0.1"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
 
+# Bitcoin (optional, for PSBT support)
+bitcoin = { version = "0.32", optional = true, default-features = false, features = ["std"] }
+
 [build-dependencies]
 prost-build = "0.13"
 
@@ -67,6 +70,7 @@ default = ["usb", "bluetooth"]
 usb = ["dep:rusb"]
 bluetooth = ["dep:btleplug"]
 os-keychain = ["dep:keyring"]
+psbt = ["dep:bitcoin"]
 
 [[example]]
 name = "get_address"

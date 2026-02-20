@@ -1,13 +1,62 @@
 //! Simple API Example
 //!
-//! Demonstrates using the unified high-level Trezor API.
+//! Demonstrates using the unified high-level Trezor API, including
+//! handling PIN and passphrase requests via a UI callback.
 //!
 //! Run with: cargo run --example simple_api
 
 use std::io::{self, Write};
+use std::sync::Arc;
 use trezor_connect_rs::{
     Trezor, GetAddressParams, GetPublicKeyParams, SignMessageParams, VerifyMessageParams,
+    TrezorUiCallback,
 };
+
+/// UI callback that prompts for PIN and passphrase via stdin.
+///
+/// Implement `TrezorUiCallback` so the library can handle PIN/passphrase
+/// requests from the device instead of returning hard errors.
+struct StdinUiCallback;
+
+impl TrezorUiCallback for StdinUiCallback {
+    fn on_pin_request(&self) -> Option<String> {
+        println!("\n--- PIN Required ---");
+        println!("Enter your PIN using the keypad layout shown on your Trezor:");
+        println!("  7 8 9");
+        println!("  4 5 6");
+        println!("  1 2 3");
+        print!("PIN: ");
+        io::stdout().flush().unwrap();
+
+        let mut pin = String::new();
+        io::stdin().read_line(&mut pin).unwrap();
+        let pin = pin.trim().to_string();
+
+        if pin.is_empty() {
+            println!("PIN entry cancelled.");
+            None
+        } else {
+            Some(pin)
+        }
+    }
+
+    fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+        if on_device {
+            println!("\n--- Passphrase Required ---");
+            println!("Please enter the passphrase on your Trezor device.");
+            // Return Some to acknowledge; the device handles input.
+            Some(String::new())
+        } else {
+            println!("\n--- Passphrase Required ---");
+            print!("Enter passphrase (leave empty for none): ");
+            io::stdout().flush().unwrap();
+
+            let mut passphrase = String::new();
+            io::stdin().read_line(&mut passphrase).unwrap();
+            Some(passphrase.trim().to_string())
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> trezor_connect_rs::Result<()> {
@@ -41,6 +90,10 @@ async fn main() -> trezor_connect_rs::Result<()> {
             builder = builder.with_credential_store(&path);
         }
     }
+
+    // Set the UI callback so PIN/passphrase requests are handled interactively
+    // instead of returning errors.
+    builder = builder.with_ui_callback(Arc::new(StdinUiCallback));
 
     let mut trezor = builder.build().await?;
 
