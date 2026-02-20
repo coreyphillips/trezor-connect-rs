@@ -3,6 +3,7 @@
 //! These types match the trezor-suite API patterns for consistency.
 
 use crate::types::bitcoin::ScriptType;
+use crate::types::network::Network;
 use serde::{Deserialize, Serialize};
 
 /// Parameters for getting an address from the device.
@@ -10,8 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct GetAddressParams {
     /// BIP32 path (e.g., "m/84'/0'/0'/0/0")
     pub path: String,
-    /// Coin name (default: "Bitcoin")
-    pub coin: Option<String>,
+    /// Coin network (default: Bitcoin)
+    pub coin: Option<Network>,
     /// Whether to display the address on the device for confirmation
     pub show_on_trezor: bool,
     /// Script type (auto-detected from path if not specified)
@@ -25,8 +26,8 @@ pub struct GetAddressParams {
 pub struct GetPublicKeyParams {
     /// BIP32 path (e.g., "m/84'/0'/0'")
     pub path: String,
-    /// Coin name (default: "Bitcoin")
-    pub coin: Option<String>,
+    /// Coin network (default: Bitcoin)
+    pub coin: Option<Network>,
     /// Whether to display on device for confirmation
     pub show_on_trezor: bool,
     /// Script type (auto-detected from path if not specified)
@@ -40,8 +41,8 @@ pub struct SignMessageParams {
     pub path: String,
     /// Message to sign
     pub message: String,
-    /// Coin name (default: "Bitcoin")
-    pub coin: Option<String>,
+    /// Coin network (default: Bitcoin)
+    pub coin: Option<Network>,
     /// If true, don't include script type in the signature
     pub no_script_type: bool,
 }
@@ -55,8 +56,8 @@ pub struct VerifyMessageParams {
     pub signature: String,
     /// Original message
     pub message: String,
-    /// Coin name (default: "Bitcoin")
-    pub coin: Option<String>,
+    /// Coin network (default: Bitcoin)
+    pub coin: Option<Network>,
 }
 
 /// Multisig configuration.
@@ -180,8 +181,8 @@ pub struct SignTxParams {
     pub inputs: Vec<SignTxInput>,
     /// Transaction outputs
     pub outputs: Vec<SignTxOutput>,
-    /// Coin name (default: "Bitcoin")
-    pub coin: Option<String>,
+    /// Coin network (default: Bitcoin)
+    pub coin: Option<Network>,
     /// Lock time (default: 0)
     pub lock_time: Option<u32>,
     /// Version (default: 2)

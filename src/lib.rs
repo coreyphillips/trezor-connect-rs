@@ -126,6 +126,7 @@ pub use ui_callback::TrezorUiCallback;
 // Re-export low-level API for advanced users
 pub use device::TrezorClient;
 pub use types::bitcoin::*;
+pub use types::network::*;
 pub use transport::Transport;
 
 // Re-export transport types based on features

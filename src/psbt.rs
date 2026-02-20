@@ -11,6 +11,7 @@ use crate::params::{
 };
 use crate::responses::SignedTxResponse;
 use crate::types::bitcoin::ScriptType;
+use crate::types::network::Network;
 
 const HARDENED: u32 = 0x80000000;
 
@@ -192,18 +193,17 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
 
     let prev_txs: Vec<SignTxPrevTx> = prev_txs_map.into_values().collect();
 
-    let coin_name = match network {
-        bitcoin::Network::Bitcoin => "Bitcoin",
-        bitcoin::Network::Testnet => "Testnet",
-        bitcoin::Network::Signet => "Testnet",
-        bitcoin::Network::Regtest => "Regtest",
-        _ => "Bitcoin",
+    let coin = match network {
+        bitcoin::Network::Bitcoin => Network::Bitcoin,
+        bitcoin::Network::Testnet | bitcoin::Network::Signet => Network::Testnet,
+        bitcoin::Network::Regtest => Network::Regtest,
+        _ => Network::Bitcoin,
     };
 
     Ok(SignTxParams {
         inputs,
         outputs,
-        coin: Some(coin_name.to_string()),
+        coin: Some(coin),
         lock_time: Some(unsigned_tx.lock_time.to_consensus_u32()),
         version: Some(unsigned_tx.version.0 as u32),
         prev_txs,
