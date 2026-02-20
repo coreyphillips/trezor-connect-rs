@@ -13,6 +13,7 @@ use crate::credential_store::{CredentialStore, StoredCredential};
 use crate::device_info::{DeviceInfo, TransportType};
 use crate::error::{Result, TransportError};
 use crate::transport::Transport;
+use crate::ui_callback::TrezorUiCallback;
 
 #[cfg(feature = "usb")]
 use crate::transport::usb::UsbTransport;
@@ -43,6 +44,7 @@ pub struct TrezorBuilder {
     scan_usb: bool,
     scan_bluetooth: bool,
     pairing_callback: Option<PairingCallback>,
+    ui_callback: Option<Arc<dyn TrezorUiCallback>>,
     host_name: String,
     app_name: String,
     scan_duration: std::time::Duration,
@@ -56,6 +58,7 @@ impl TrezorBuilder {
             scan_usb: true,
             scan_bluetooth: true,
             pairing_callback: None,
+            ui_callback: None,
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
             scan_duration: std::time::Duration::from_secs(3),
@@ -105,6 +108,15 @@ impl TrezorBuilder {
     /// ```
     pub fn with_pairing_callback(mut self, callback: PairingCallback) -> Self {
         self.pairing_callback = Some(callback);
+        self
+    }
+
+    /// Set the UI callback for handling PIN and passphrase requests.
+    ///
+    /// When set, PIN and passphrase requests will be forwarded to this callback
+    /// instead of returning `PinRequired` / `PassphraseRequired` errors.
+    pub fn with_ui_callback(mut self, callback: Arc<dyn TrezorUiCallback>) -> Self {
+        self.ui_callback = Some(callback);
         self
     }
 
@@ -203,6 +215,7 @@ impl TrezorBuilder {
             ble_transport,
             credential_store,
             pairing_callback: self.pairing_callback,
+            ui_callback: self.ui_callback,
             scan_duration: self.scan_duration,
         })
     }
@@ -230,6 +243,7 @@ pub struct Trezor {
     ble_transport: Option<Arc<BluetoothTransport>>,
     credential_store: Option<CredentialStore>,
     pairing_callback: Option<PairingCallback>,
+    ui_callback: Option<Arc<dyn TrezorUiCallback>>,
     scan_duration: std::time::Duration,
 }
 
@@ -321,11 +335,17 @@ impl Trezor {
         // Acquire session
         let session = transport.acquire(&device.path, None).await?;
 
-        Ok(ConnectedDevice::new(
+        let mut connected = ConnectedDevice::new(
             device.clone(),
             Box::new(TransportWrapper::Usb(Arc::clone(transport))),
             session,
-        ))
+        );
+
+        if let Some(ref cb) = self.ui_callback {
+            connected.set_ui_callback(cb.clone());
+        }
+
+        Ok(connected)
     }
 
     #[cfg(not(feature = "usb"))]
@@ -391,12 +411,18 @@ impl Trezor {
         // Share transport via Arc clone
         let transport_box = Box::new(TransportWrapper::Bluetooth(Arc::clone(transport)));
 
-        log::debug!("Returning ConnectedDevice");
-        Ok(ConnectedDevice::new(
+        let mut connected = ConnectedDevice::new(
             device.clone(),
             transport_box,
             session,
-        ))
+        );
+
+        if let Some(ref cb) = self.ui_callback {
+            connected.set_ui_callback(cb.clone());
+        }
+
+        log::debug!("Returning ConnectedDevice");
+        Ok(connected)
     }
 
     #[cfg(not(feature = "bluetooth"))]

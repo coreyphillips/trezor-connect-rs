@@ -1,5 +1,7 @@
 //! TrezorClient - Main client for device communication.
 
+use std::sync::Arc;
+
 use prost::Message;
 
 use crate::api::sign_tx::{SignTransactionParams, SignedTransaction, TxInput, TxOutput};
@@ -9,6 +11,7 @@ use crate::protos::bitcoin::{tx_ack, tx_request};
 use crate::transport::Transport;
 use crate::types::path::parse_path;
 use crate::types::bitcoin::{ScriptType, OutputScriptType};
+use crate::ui_callback::TrezorUiCallback;
 
 use super::Features;
 
@@ -39,6 +42,7 @@ pub struct TrezorClient<T: Transport> {
     transport: T,
     session: Option<String>,
     features: Option<Features>,
+    ui_callback: Option<Arc<dyn TrezorUiCallback>>,
 }
 
 impl<T: Transport> TrezorClient<T> {
@@ -48,7 +52,13 @@ impl<T: Transport> TrezorClient<T> {
             transport,
             session: None,
             features: None,
+            ui_callback: None,
         }
+    }
+
+    /// Set the UI callback for handling PIN and passphrase requests.
+    pub fn set_ui_callback(&mut self, cb: Arc<dyn TrezorUiCallback>) {
+        self.ui_callback = Some(cb);
     }
 
     /// Handle potential button request/PIN/passphrase flows
@@ -87,9 +97,71 @@ impl<T: Transport> TrezorClient<T> {
                     continue;
                 }
                 Ok(MessageType::PinMatrixRequest) => {
+                    if let Some(ref cb) = self.ui_callback {
+                        match cb.on_pin_request() {
+                            Some(pin) => {
+                                let ack = protos::PinMatrixAck { pin };
+                                let session = self.session.as_ref()
+                                    .ok_or(DeviceError::NotConnected)?;
+                                let (next_type, next_data) = self.transport.call(
+                                    session,
+                                    MessageType::PinMatrixAck as u16,
+                                    &ack.encode_to_vec(),
+                                ).await?;
+                                current_type = next_type;
+                                current_data = next_data;
+                                continue;
+                            }
+                            None => return Err(DeviceError::PinCancelled.into()),
+                        }
+                    }
                     return Err(DeviceError::PinRequired.into());
                 }
                 Ok(MessageType::PassphraseRequest) => {
+                    if let Some(ref cb) = self.ui_callback {
+                        let request = protos::PassphraseRequest::decode(current_data.as_slice())
+                            .unwrap_or_default();
+                        let on_device = request.on_device.unwrap_or(false);
+
+                        if on_device {
+                            let ack = protos::PassphraseAck {
+                                passphrase: None,
+                                state: None,
+                                on_device: Some(true),
+                            };
+                            let session = self.session.as_ref()
+                                .ok_or(DeviceError::NotConnected)?;
+                            let (next_type, next_data) = self.transport.call(
+                                session,
+                                MessageType::PassphraseAck as u16,
+                                &ack.encode_to_vec(),
+                            ).await?;
+                            current_type = next_type;
+                            current_data = next_data;
+                            continue;
+                        }
+
+                        match cb.on_passphrase_request(false) {
+                            Some(passphrase) => {
+                                let ack = protos::PassphraseAck {
+                                    passphrase: Some(passphrase),
+                                    state: None,
+                                    on_device: None,
+                                };
+                                let session = self.session.as_ref()
+                                    .ok_or(DeviceError::NotConnected)?;
+                                let (next_type, next_data) = self.transport.call(
+                                    session,
+                                    MessageType::PassphraseAck as u16,
+                                    &ack.encode_to_vec(),
+                                ).await?;
+                                current_type = next_type;
+                                current_data = next_data;
+                                continue;
+                            }
+                            None => return Err(DeviceError::PassphraseRequired.into()),
+                        }
+                    }
                     return Err(DeviceError::PassphraseRequired.into());
                 }
                 _ => {
@@ -363,6 +435,16 @@ impl<T: Transport> TrezorClient<T> {
                 continue;
             }
 
+            // Handle failure (e.g., user cancelled on device)
+            if let Ok(MessageType::Failure) = MessageType::try_from(resp_type as i32) {
+                let failure = protos::common::Failure::decode(resp_data.as_slice())
+                    .map_err(|e| DeviceError::ProtobufDecode(e.to_string()))?;
+                return Err(DeviceError::DeviceError {
+                    code: failure.code.unwrap_or(0),
+                    message: failure.message.unwrap_or_default(),
+                }.into());
+            }
+
             // Parse TxRequest
             let tx_request = protos::bitcoin::TxRequest::decode(resp_data.as_slice())
                 .map_err(|e| DeviceError::ProtobufDecode(e.to_string()))?;
@@ -371,7 +453,13 @@ impl<T: Transport> TrezorClient<T> {
             if let Some(ref serialized) = tx_request.serialized {
                 if let Some(ref sig) = serialized.signature {
                     if let Some(sig_idx) = serialized.signature_index {
-                        signatures[sig_idx as usize] = hex::encode(sig);
+                        let idx = sig_idx as usize;
+                        if idx >= signatures.len() {
+                            return Err(DeviceError::InvalidInput(
+                                format!("signature_index {} out of bounds (max {})", idx, signatures.len().saturating_sub(1))
+                            ).into());
+                        }
+                        signatures[idx] = hex::encode(sig);
                     }
                 }
                 if let Some(ref tx_part) = serialized.serialized_tx {
@@ -390,12 +478,30 @@ impl<T: Transport> TrezorClient<T> {
                     break;
                 }
                 tx_request::RequestType::Txinput => {
-                    // Device wants an input
                     let details = tx_request.details.as_ref()
                         .ok_or(DeviceError::ProtobufDecode("Missing details".to_string()))?;
                     let idx = details.request_index.unwrap_or(0) as usize;
 
-                    let tx_ack = self.build_input_ack(&params.inputs[idx])?;
+                    let tx_ack = if let Some(ref tx_hash) = details.tx_hash {
+                        // Previous transaction input
+                        let prev_tx = params.prev_txs.iter()
+                            .find(|tx| tx.hash == *tx_hash)
+                            .ok_or(DeviceError::ProtobufDecode("Previous tx not found".to_string()))?;
+                        if idx >= prev_tx.inputs.len() {
+                            return Err(DeviceError::InvalidInput(
+                                format!("prev tx input index {} out of bounds (len {})", idx, prev_tx.inputs.len())
+                            ).into());
+                        }
+                        self.build_prev_tx_input_ack(&prev_tx.inputs[idx])?
+                    } else {
+                        if idx >= params.inputs.len() {
+                            return Err(DeviceError::InvalidInput(
+                                format!("request_index {} out of bounds for inputs (len {})", idx, params.inputs.len())
+                            ).into());
+                        }
+                        self.build_input_ack(&params.inputs[idx])?
+                    };
+
                     let result = self.transport.call(
                         session,
                         MessageType::TxAck as u16,
@@ -405,12 +511,30 @@ impl<T: Transport> TrezorClient<T> {
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txoutput => {
-                    // Device wants an output
                     let details = tx_request.details.as_ref()
                         .ok_or(DeviceError::ProtobufDecode("Missing details".to_string()))?;
                     let idx = details.request_index.unwrap_or(0) as usize;
 
-                    let tx_ack = self.build_output_ack(&params.outputs[idx])?;
+                    let tx_ack = if let Some(ref tx_hash) = details.tx_hash {
+                        // Previous transaction output (uses bin_outputs)
+                        let prev_tx = params.prev_txs.iter()
+                            .find(|tx| tx.hash == *tx_hash)
+                            .ok_or(DeviceError::ProtobufDecode("Previous tx not found".to_string()))?;
+                        if idx >= prev_tx.outputs.len() {
+                            return Err(DeviceError::InvalidInput(
+                                format!("prev tx output index {} out of bounds (len {})", idx, prev_tx.outputs.len())
+                            ).into());
+                        }
+                        self.build_prev_tx_output_ack(&prev_tx.outputs[idx])?
+                    } else {
+                        if idx >= params.outputs.len() {
+                            return Err(DeviceError::InvalidInput(
+                                format!("request_index {} out of bounds for outputs (len {})", idx, params.outputs.len())
+                            ).into());
+                        }
+                        self.build_output_ack(&params.outputs[idx])?
+                    };
+
                     let result = self.transport.call(
                         session,
                         MessageType::TxAck as u16,
@@ -420,19 +544,70 @@ impl<T: Transport> TrezorClient<T> {
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txmeta => {
-                    // Device wants previous tx metadata
                     let details = tx_request.details.as_ref()
                         .ok_or(DeviceError::ProtobufDecode("Missing details".to_string()))?;
-
                     let tx_hash = details.tx_hash.as_ref()
                         .ok_or(DeviceError::ProtobufDecode("Missing tx_hash".to_string()))?;
-
-                    // Find the prev tx
                     let prev_tx = params.prev_txs.iter()
                         .find(|tx| tx.hash == *tx_hash)
                         .ok_or(DeviceError::ProtobufDecode("Previous tx not found".to_string()))?;
 
                     let tx_ack = self.build_prev_tx_meta_ack(prev_tx)?;
+                    let result = self.transport.call(
+                        session,
+                        MessageType::TxAck as u16,
+                        &tx_ack.encode_to_vec(),
+                    ).await?;
+                    resp_type = result.0;
+                    resp_data = result.1;
+                }
+                tx_request::RequestType::Txoriginput => {
+                    let details = tx_request.details.as_ref()
+                        .ok_or(DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let idx = details.request_index.unwrap_or(0);
+                    let tx_hash = details.tx_hash.as_ref()
+                        .ok_or(DeviceError::ProtobufDecode("Missing tx_hash for TXORIGINPUT".to_string()))?;
+
+                    // Find the current input that references this original transaction
+                    let orig_input = params.inputs.iter()
+                        .find(|input| {
+                            input.orig_hash.as_ref() == Some(tx_hash) && input.orig_index == Some(idx)
+                        })
+                        .ok_or(DeviceError::InvalidInput(
+                            format!("No current input references orig tx {} at index {}", hex::encode(tx_hash), idx)
+                        ))?;
+
+                    let tx_ack = self.build_input_ack(orig_input)?;
+                    let result = self.transport.call(
+                        session,
+                        MessageType::TxAck as u16,
+                        &tx_ack.encode_to_vec(),
+                    ).await?;
+                    resp_type = result.0;
+                    resp_data = result.1;
+                }
+                tx_request::RequestType::Txorigoutput => {
+                    let details = tx_request.details.as_ref()
+                        .ok_or(DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let idx = details.request_index.unwrap_or(0);
+                    let tx_hash = details.tx_hash.as_ref()
+                        .ok_or(DeviceError::ProtobufDecode("Missing tx_hash for TXORIGOUTPUT".to_string()))?;
+
+                    // Find the current output that references this original transaction
+                    let orig_output = params.outputs.iter()
+                        .find(|output| {
+                            let (oh, oi) = match output {
+                                TxOutput::External { orig_hash, orig_index, .. } => (orig_hash, orig_index),
+                                TxOutput::Change { orig_hash, orig_index, .. } => (orig_hash, orig_index),
+                                TxOutput::OpReturn { orig_hash, orig_index, .. } => (orig_hash, orig_index),
+                            };
+                            oh.as_ref() == Some(tx_hash) && *oi == Some(idx)
+                        })
+                        .ok_or(DeviceError::InvalidInput(
+                            format!("No current output references orig tx {} at index {}", hex::encode(tx_hash), idx)
+                        ))?;
+
+                    let tx_ack = self.build_output_ack(orig_output)?;
                     let result = self.transport.call(
                         session,
                         MessageType::TxAck as u16,
@@ -462,10 +637,123 @@ impl<T: Transport> TrezorClient<T> {
             prev_hash: input.prev_hash.clone(),
             prev_index: input.prev_index,
             script_sig: None,
-            sequence: input.sequence.or(Some(0xFFFFFFFF)),
+            sequence: input.sequence.or(Some(0xFFFFFFFD)), // RBF enabled by default
             script_type: Some(input.script_type as i32),
             multisig: None,
             amount: Some(input.amount),
+            decred_tree: None,
+            witness: None,
+            ownership_proof: None,
+            commitment_data: None,
+            orig_hash: input.orig_hash.clone(),
+            orig_index: input.orig_index,
+            decred_staking_spend: None,
+            script_pubkey: None,
+            coinjoin_flags: None,
+        };
+
+        Ok(protos::bitcoin::TxAck {
+            tx: Some(tx_ack::TransactionType {
+                version: None,
+                inputs: vec![tx_input],
+                bin_outputs: vec![],
+                lock_time: None,
+                outputs: vec![],
+                inputs_cnt: None,
+                outputs_cnt: None,
+                extra_data: None,
+                extra_data_len: None,
+                expiry: None,
+                overwintered: None,
+                version_group_id: None,
+                timestamp: None,
+                branch_id: None,
+            }),
+        })
+    }
+
+    /// Build TxAck for an output
+    fn build_output_ack(&self, output: &TxOutput) -> Result<protos::bitcoin::TxAck> {
+        let tx_output = match output {
+            TxOutput::External { address, amount, orig_hash, orig_index } => {
+                tx_ack::transaction_type::TxOutputType {
+                    address: Some(address.clone()),
+                    address_n: vec![],
+                    amount: *amount,
+                    script_type: Some(OutputScriptType::PayToAddress as i32),
+                    multisig: None,
+                    op_return_data: None,
+                    orig_hash: orig_hash.clone(),
+                    orig_index: *orig_index,
+                    payment_req_index: None,
+                }
+            }
+            TxOutput::Change { path, amount, script_type, orig_hash, orig_index } => {
+                let output_script_type = match script_type {
+                    ScriptType::SpendAddress => OutputScriptType::PayToAddress,
+                    ScriptType::SpendP2SHWitness => OutputScriptType::PayToP2SHWitness,
+                    ScriptType::SpendWitness => OutputScriptType::PayToWitness,
+                    ScriptType::SpendTaproot => OutputScriptType::PayToTaproot,
+                    _ => OutputScriptType::PayToAddress,
+                };
+                tx_ack::transaction_type::TxOutputType {
+                    address: None,
+                    address_n: path.clone(),
+                    amount: *amount,
+                    script_type: Some(output_script_type as i32),
+                    multisig: None,
+                    op_return_data: None,
+                    orig_hash: orig_hash.clone(),
+                    orig_index: *orig_index,
+                    payment_req_index: None,
+                }
+            }
+            TxOutput::OpReturn { data, orig_hash, orig_index } => {
+                tx_ack::transaction_type::TxOutputType {
+                    address: None,
+                    address_n: vec![],
+                    amount: 0,
+                    script_type: Some(OutputScriptType::PayToOpReturn as i32),
+                    multisig: None,
+                    op_return_data: Some(data.clone()),
+                    orig_hash: orig_hash.clone(),
+                    orig_index: *orig_index,
+                    payment_req_index: None,
+                }
+            }
+        };
+
+        Ok(protos::bitcoin::TxAck {
+            tx: Some(tx_ack::TransactionType {
+                version: None,
+                inputs: vec![],
+                bin_outputs: vec![],
+                lock_time: None,
+                outputs: vec![tx_output],
+                inputs_cnt: None,
+                outputs_cnt: None,
+                extra_data: None,
+                extra_data_len: None,
+                expiry: None,
+                overwintered: None,
+                version_group_id: None,
+                timestamp: None,
+                branch_id: None,
+            }),
+        })
+    }
+
+    /// Build TxAck for a previous transaction input
+    fn build_prev_tx_input_ack(&self, input: &crate::api::sign_tx::PrevTxInput) -> Result<protos::bitcoin::TxAck> {
+        let tx_input = tx_ack::transaction_type::TxInputType {
+            address_n: vec![],
+            prev_hash: input.prev_hash.clone(),
+            prev_index: input.prev_index,
+            script_sig: Some(input.script_sig.clone()),
+            sequence: Some(input.sequence),
+            script_type: Some(ScriptType::SpendAddress as i32),
+            multisig: None,
+            amount: Some(0),
             decred_tree: None,
             witness: None,
             ownership_proof: None,
@@ -497,64 +785,21 @@ impl<T: Transport> TrezorClient<T> {
         })
     }
 
-    /// Build TxAck for an output
-    fn build_output_ack(&self, output: &TxOutput) -> Result<protos::bitcoin::TxAck> {
-        let tx_output = match output {
-            TxOutput::External { address, amount } => {
-                tx_ack::transaction_type::TxOutputType {
-                    address: Some(address.clone()),
-                    address_n: vec![],
-                    amount: *amount,
-                    script_type: Some(OutputScriptType::PayToAddress as i32),
-                    multisig: None,
-                    op_return_data: None,
-                    orig_hash: None,
-                    orig_index: None,
-                    payment_req_index: None,
-                }
-            }
-            TxOutput::Change { path, amount, script_type } => {
-                let output_script_type = match script_type {
-                    ScriptType::SpendAddress => OutputScriptType::PayToAddress,
-                    ScriptType::SpendP2SHWitness => OutputScriptType::PayToP2SHWitness,
-                    ScriptType::SpendWitness => OutputScriptType::PayToWitness,
-                    ScriptType::SpendTaproot => OutputScriptType::PayToTaproot,
-                    _ => OutputScriptType::PayToAddress,
-                };
-                tx_ack::transaction_type::TxOutputType {
-                    address: None,
-                    address_n: path.clone(),
-                    amount: *amount,
-                    script_type: Some(output_script_type as i32),
-                    multisig: None,
-                    op_return_data: None,
-                    orig_hash: None,
-                    orig_index: None,
-                    payment_req_index: None,
-                }
-            }
-            TxOutput::OpReturn { data } => {
-                tx_ack::transaction_type::TxOutputType {
-                    address: None,
-                    address_n: vec![],
-                    amount: 0,
-                    script_type: Some(OutputScriptType::PayToOpReturn as i32),
-                    multisig: None,
-                    op_return_data: Some(data.clone()),
-                    orig_hash: None,
-                    orig_index: None,
-                    payment_req_index: None,
-                }
-            }
+    /// Build TxAck for a previous transaction output (uses bin_outputs)
+    fn build_prev_tx_output_ack(&self, output: &crate::api::sign_tx::PrevTxOutput) -> Result<protos::bitcoin::TxAck> {
+        let bin_output = tx_ack::transaction_type::TxOutputBinType {
+            amount: output.amount,
+            script_pubkey: output.script_pubkey.clone(),
+            decred_script_version: None,
         };
 
         Ok(protos::bitcoin::TxAck {
             tx: Some(tx_ack::TransactionType {
                 version: None,
                 inputs: vec![],
-                bin_outputs: vec![],
+                bin_outputs: vec![bin_output],
                 lock_time: None,
-                outputs: vec![tx_output],
+                outputs: vec![],
                 inputs_cnt: None,
                 outputs_cnt: None,
                 extra_data: None,
@@ -580,7 +825,7 @@ impl<T: Transport> TrezorClient<T> {
                 inputs_cnt: Some(prev_tx.inputs.len() as u32),
                 outputs_cnt: Some(prev_tx.outputs.len() as u32),
                 extra_data: None,
-                extra_data_len: None,
+                extra_data_len: Some(0),
                 expiry: None,
                 overwintered: None,
                 version_group_id: None,

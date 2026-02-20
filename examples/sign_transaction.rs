@@ -1,13 +1,43 @@
 //! Example: Sign a Bitcoin transaction with Trezor
 //!
 //! This example demonstrates how to sign a Bitcoin transaction
-//! using a Trezor device.
+//! using a Trezor device. Handles PIN/passphrase requests via stdin.
 
+use std::io::{self, Write};
+use std::sync::Arc;
 use trezor_connect_rs::{
-    TrezorClient, UsbTransport, Result,
+    TrezorClient, UsbTransport, Result, TrezorUiCallback,
     api::sign_tx::{SignTransactionParams, TxInput, TxOutput},
     transport::Transport,
 };
+
+/// UI callback that prompts for PIN and passphrase via stdin.
+struct StdinUiCallback;
+
+impl TrezorUiCallback for StdinUiCallback {
+    fn on_pin_request(&self) -> Option<String> {
+        println!("\nEnter PIN using the keypad layout on your Trezor (7-8-9 / 4-5-6 / 1-2-3):");
+        print!("PIN: ");
+        io::stdout().flush().unwrap();
+        let mut pin = String::new();
+        io::stdin().read_line(&mut pin).unwrap();
+        let pin = pin.trim().to_string();
+        if pin.is_empty() { None } else { Some(pin) }
+    }
+
+    fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+        if on_device {
+            println!("\nPlease enter the passphrase on your Trezor device.");
+            Some(String::new())
+        } else {
+            print!("\nEnter passphrase (leave empty for none): ");
+            io::stdout().flush().unwrap();
+            let mut passphrase = String::new();
+            io::stdin().read_line(&mut passphrase).unwrap();
+            Some(passphrase.trim().to_string())
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,6 +57,7 @@ async fn main() -> Result<()> {
     // Connect to the first device
     let device_path = &devices[0].path;
     let mut client = TrezorClient::new(transport);
+    client.set_ui_callback(Arc::new(StdinUiCallback));
     client.acquire(device_path).await?;
 
     // Initialize device
