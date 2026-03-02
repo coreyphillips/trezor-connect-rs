@@ -73,6 +73,8 @@ pub struct SignedTxResponse {
     pub signatures: Vec<String>,
     /// Serialized transaction (hex)
     pub serialized_tx: String,
+    /// Broadcast transaction ID (populated when push=true)
+    pub txid: Option<String>,
 }
 
 #[cfg(test)]
