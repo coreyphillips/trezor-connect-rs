@@ -358,13 +358,17 @@ impl ConnectedDevice {
             }
         }
 
-        // Parse all input paths upfront
+        // Parse all input paths upfront (EXTERNAL inputs may have empty paths)
         let parsed_inputs: Vec<(Vec<u32>, ScriptType)> = params
             .inputs
             .iter()
             .map(|input| {
-                let path = parse_path(&input.path)?;
-                Ok((path, input.script_type))
+                if input.script_type == ScriptType::External && input.path.is_empty() {
+                    Ok((vec![], input.script_type))
+                } else {
+                    let path = parse_path(&input.path)?;
+                    Ok((path, input.script_type))
+                }
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -383,6 +387,25 @@ impl ConnectedDevice {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Send UnlockPath if provided
+        if let Some(ref unlock) = params.unlock_path {
+            let unlock_msg = protos::management::UnlockPath {
+                address_n: unlock.address_n.clone(),
+                mac: unlock.mac.as_ref().map(|m| hex::decode(m)).transpose()
+                    .map_err(|e| DeviceError::InvalidInput(format!("Invalid unlock_path mac hex: {}", e)))?,
+            };
+
+            let (resp_type, resp_data) = self.transport.call(
+                &self.session,
+                MessageType::UnlockPath as u16,
+                &unlock_msg.encode_to_vec(),
+            ).await?;
+
+            // Expect UnlockedPathRequest response (message type 94)
+            let _: protos::management::UnlockedPathRequest =
+                self.handle_response(resp_type, resp_data).await?;
+        }
+
         // Send initial SignTx message
         let sign_tx = protos::bitcoin::SignTx {
             outputs_count: params.outputs.len() as u32,
@@ -395,11 +418,11 @@ impl ConnectedDevice {
             version_group_id: None,
             timestamp: None,
             branch_id: None,
-            amount_unit: None,
+            amount_unit: params.amount_unit.map(|u| u as i32),
             decred_staking_ticket: None,
-            serialize: None,
+            serialize: params.serialize,
             coinjoin_request: None,
-            chunkify: None,
+            chunkify: params.chunkify,
         };
 
         let (mut resp_type, mut resp_data) = self.transport.call(
@@ -603,11 +626,76 @@ impl ConnectedDevice {
                     resp_type = result.0;
                     resp_data = result.1;
                 }
-                tx_request::RequestType::Txextradata
-                | tx_request::RequestType::Txpaymentreq => {
-                    return Err(DeviceError::NotSupported(
-                        format!("Unsupported TxRequest type: {:?}", request_type)
-                    ).into());
+                tx_request::RequestType::Txextradata => {
+                    let details = tx_request.details.as_ref()
+                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details for TXEXTRADATA".to_string()))?;
+                    let tx_hash = details.tx_hash.as_ref()
+                        .ok_or_else(|| DeviceError::InvalidInput("TXEXTRADATA missing tx_hash".to_string()))?;
+                    let prev_tx = find_prev_tx(&params.prev_txs, tx_hash)?;
+
+                    let extra_data_bytes = prev_tx.extra_data.as_ref()
+                        .map(|d| hex::decode(d))
+                        .transpose()
+                        .map_err(|e| DeviceError::InvalidInput(format!("Invalid extra_data hex: {}", e)))?
+                        .unwrap_or_default();
+
+                    let offset = details.extra_data_offset.unwrap_or(0) as usize;
+                    let length = details.extra_data_len.unwrap_or(0) as usize;
+                    let end = std::cmp::min(offset + length, extra_data_bytes.len());
+                    let chunk = if offset < extra_data_bytes.len() {
+                        extra_data_bytes[offset..end].to_vec()
+                    } else {
+                        vec![]
+                    };
+
+                    let tx_ack = protos::bitcoin::TxAck {
+                        tx: Some(tx_ack::TransactionType {
+                            version: None,
+                            inputs: vec![],
+                            bin_outputs: vec![],
+                            lock_time: None,
+                            outputs: vec![],
+                            inputs_cnt: None,
+                            outputs_cnt: None,
+                            extra_data: Some(chunk),
+                            extra_data_len: None,
+                            expiry: None,
+                            overwintered: None,
+                            version_group_id: None,
+                            timestamp: None,
+                            branch_id: None,
+                        }),
+                    };
+
+                    let result = self.transport.call(
+                        &self.session,
+                        MessageType::TxAck as u16,
+                        &tx_ack.encode_to_vec(),
+                    ).await?;
+                    resp_type = result.0;
+                    resp_data = result.1;
+                }
+                tx_request::RequestType::Txpaymentreq => {
+                    let details = tx_request.details.as_ref()
+                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details for TXPAYMENTREQ".to_string()))?;
+                    let idx = details.request_index.unwrap_or(0) as usize;
+
+                    if idx >= params.payment_requests.len() {
+                        return Err(DeviceError::InvalidInput(
+                            format!("payment_req_index {} out of bounds (len {})", idx, params.payment_requests.len())
+                        ).into());
+                    }
+
+                    let pr = &params.payment_requests[idx];
+                    let payment_req = convert_payment_request(pr)?;
+
+                    let result = self.transport.call(
+                        &self.session,
+                        MessageType::PaymentRequest as u16,
+                        &payment_req.encode_to_vec(),
+                    ).await?;
+                    resp_type = result.0;
+                    resp_data = result.1;
                 }
             }
         }
@@ -615,6 +703,7 @@ impl ConnectedDevice {
         Ok(SignedTxResponse {
             signatures,
             serialized_tx: hex::encode(&serialized_tx),
+            txid: None,
         })
     }
 
@@ -627,24 +716,58 @@ impl ConnectedDevice {
         let prev_hash = hex::decode(&input.prev_hash)
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid prev_hash hex: {}", e)))?;
 
+        let multisig = input.multisig.as_ref().map(convert_multisig).transpose()?;
+
+        // For EXTERNAL inputs, decode optional hex fields
+        let script_sig = if input.script_type == ScriptType::External {
+            input.script_sig.as_ref().map(|s| hex::decode(s)).transpose()
+                .map_err(|e| DeviceError::InvalidInput(format!("Invalid script_sig hex: {}", e)))?
+        } else {
+            None
+        };
+        let witness = if input.script_type == ScriptType::External {
+            input.witness.as_ref().map(|w| hex::decode(w)).transpose()
+                .map_err(|e| DeviceError::InvalidInput(format!("Invalid witness hex: {}", e)))?
+        } else {
+            None
+        };
+        let ownership_proof = if input.script_type == ScriptType::External {
+            input.ownership_proof.as_ref().map(|p| hex::decode(p)).transpose()
+                .map_err(|e| DeviceError::InvalidInput(format!("Invalid ownership_proof hex: {}", e)))?
+        } else {
+            None
+        };
+        let commitment_data = if input.script_type == ScriptType::External {
+            input.commitment_data.as_ref().map(|c| hex::decode(c)).transpose()
+                .map_err(|e| DeviceError::InvalidInput(format!("Invalid commitment_data hex: {}", e)))?
+        } else {
+            None
+        };
+        let script_pubkey = if input.script_type == ScriptType::External {
+            input.script_pubkey.as_ref().map(|s| hex::decode(s)).transpose()
+                .map_err(|e| DeviceError::InvalidInput(format!("Invalid script_pubkey hex: {}", e)))?
+        } else {
+            None
+        };
+
         let tx_input = tx_ack::transaction_type::TxInputType {
             address_n: parsed.0.clone(),
             prev_hash,
             prev_index: input.prev_index,
-            script_sig: None,
+            script_sig,
             sequence: input.sequence.or(Some(0xFFFFFFFD)), // RBF enabled by default
             script_type: Some(parsed.1 as i32),
-            multisig: None,
+            multisig,
             amount: Some(input.amount),
             decred_tree: None,
-            witness: None,
-            ownership_proof: None,
-            commitment_data: None,
+            witness,
+            ownership_proof,
+            commitment_data,
             orig_hash: input.orig_hash.as_ref().map(|h| hex::decode(h)).transpose()
                 .map_err(|e| DeviceError::InvalidInput(format!("Invalid orig_hash hex: {}", e)))?,
             orig_index: input.orig_index,
             decred_staking_spend: None,
-            script_pubkey: None,
+            script_pubkey,
             coinjoin_flags: None,
         };
 
@@ -677,6 +800,7 @@ impl ConnectedDevice {
         let orig_hash = output.orig_hash.as_ref().map(|h| hex::decode(h)).transpose()
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid orig_hash hex: {}", e)))?;
         let orig_index = output.orig_index;
+        let payment_req_index = output.payment_req_index;
 
         let tx_output = if let Some(ref op_return_data) = output.op_return_data {
             // OP_RETURN output
@@ -691,27 +815,32 @@ impl ConnectedDevice {
                 op_return_data: Some(data),
                 orig_hash,
                 orig_index,
-                payment_req_index: None,
+                payment_req_index,
             }
         } else if let Some((path, script_type)) = parsed {
             // Change output (to own address)
-            let output_script_type = match script_type {
-                ScriptType::SpendAddress => OutputScriptType::PayToAddress,
-                ScriptType::SpendP2SHWitness => OutputScriptType::PayToP2SHWitness,
-                ScriptType::SpendWitness => OutputScriptType::PayToWitness,
-                ScriptType::SpendTaproot => OutputScriptType::PayToTaproot,
-                _ => OutputScriptType::PayToAddress,
+            let multisig = output.multisig.as_ref().map(convert_multisig).transpose()?;
+            let output_script_type = if multisig.is_some() {
+                OutputScriptType::PayToMultisig
+            } else {
+                match script_type {
+                    ScriptType::SpendAddress => OutputScriptType::PayToAddress,
+                    ScriptType::SpendP2SHWitness => OutputScriptType::PayToP2SHWitness,
+                    ScriptType::SpendWitness => OutputScriptType::PayToWitness,
+                    ScriptType::SpendTaproot => OutputScriptType::PayToTaproot,
+                    _ => OutputScriptType::PayToAddress,
+                }
             };
             tx_ack::transaction_type::TxOutputType {
                 address: None,
                 address_n: path.clone(),
                 amount: output.amount,
                 script_type: Some(output_script_type as i32),
-                multisig: None,
+                multisig,
                 op_return_data: None,
                 orig_hash,
                 orig_index,
-                payment_req_index: None,
+                payment_req_index,
             }
         } else if let Some(ref address) = output.address {
             // External output (to address)
@@ -724,7 +853,7 @@ impl ConnectedDevice {
                 op_return_data: None,
                 orig_hash,
                 orig_index,
-                payment_req_index: None,
+                payment_req_index,
             }
         } else {
             return Err(DeviceError::InvalidInput(
@@ -754,6 +883,12 @@ impl ConnectedDevice {
 
     /// Build TxAck for previous transaction metadata
     fn build_prev_tx_meta_ack(&self, prev_tx: &SignTxPrevTx) -> Result<protos::bitcoin::TxAck> {
+        let extra_data_len = prev_tx.extra_data.as_ref()
+            .map(|d| hex::decode(d).map(|b| b.len() as u32))
+            .transpose()
+            .map_err(|e| DeviceError::InvalidInput(format!("Invalid extra_data hex: {}", e)))?
+            .unwrap_or(0);
+
         Ok(protos::bitcoin::TxAck {
             tx: Some(tx_ack::TransactionType {
                 version: Some(prev_tx.version),
@@ -764,7 +899,7 @@ impl ConnectedDevice {
                 inputs_cnt: Some(prev_tx.inputs.len() as u32),
                 outputs_cnt: Some(prev_tx.outputs.len() as u32),
                 extra_data: None,
-                extra_data_len: Some(0),
+                extra_data_len: Some(extra_data_len),
                 expiry: None,
                 overwintered: None,
                 version_group_id: None,
@@ -990,6 +1125,106 @@ fn find_prev_tx<'a>(prev_txs: &'a [SignTxPrevTx], tx_hash_bytes: &[u8]) -> Resul
         .ok_or_else(|| DeviceError::InvalidInput(
             format!("Previous transaction {} not found in prev_txs", tx_hash_hex)
         ).into())
+}
+
+/// Convert MultisigConfig to protobuf MultisigRedeemScriptType.
+fn convert_multisig(config: &MultisigConfig) -> Result<protos::bitcoin::MultisigRedeemScriptType> {
+    use protos::bitcoin::multisig_redeem_script_type::HdNodePathType;
+
+    let pubkeys = config.pubkeys.iter().map(|pk| {
+        let node = if let Some(ref hd) = pk.node {
+            Some(protos::common::HdNodeType {
+                depth: hd.depth,
+                fingerprint: hd.fingerprint,
+                child_num: hd.child_num,
+                chain_code: hd.chain_code.clone(),
+                private_key: None,
+                public_key: hd.public_key.clone(),
+            })
+        } else if let Some(ref _xpub) = pk.xpub {
+            // When xpub is provided without an explicit node, the device expects
+            // the node field. The caller should provide the decoded HDNodeType.
+            // For now we leave node as a placeholder — the device will reject
+            // if neither node nor xpub resolves.
+            None
+        } else {
+            None
+        };
+
+        HdNodePathType {
+            node: node.unwrap_or_default(),
+            address_n: pk.address_n.clone(),
+        }
+    }).collect();
+
+    let signatures = config.signatures.as_ref()
+        .map(|sigs| sigs.iter().map(|s| {
+            if s.is_empty() {
+                vec![]
+            } else {
+                hex::decode(s).unwrap_or_default()
+            }
+        }).collect())
+        .unwrap_or_else(|| vec![vec![]; config.pubkeys.len()]);
+
+    Ok(protos::bitcoin::MultisigRedeemScriptType {
+        pubkeys,
+        signatures,
+        m: config.m,
+        nodes: vec![],
+        address_n: vec![],
+        pubkeys_order: None,
+    })
+}
+
+/// Convert PaymentRequest params to protobuf PaymentRequest.
+fn convert_payment_request(pr: &PaymentRequest) -> Result<protos::common::PaymentRequest> {
+    use protos::common::payment_request::*;
+
+    let nonce = pr.nonce.as_ref()
+        .map(|n| hex::decode(n))
+        .transpose()
+        .map_err(|e| DeviceError::InvalidInput(format!("Invalid payment_request nonce hex: {}", e)))?;
+
+    let signature = hex::decode(&pr.signature)
+        .map_err(|e| DeviceError::InvalidInput(format!("Invalid payment_request signature hex: {}", e)))?;
+
+    let memos = pr.memos.iter().map(|m| {
+        PaymentRequestMemo {
+            text_memo: m.text_memo.as_ref().map(|t| TextMemo {
+                text: t.text.clone(),
+            }),
+            refund_memo: m.refund_memo.as_ref().map(|r| {
+                let mac = hex::decode(&r.mac).unwrap_or_default();
+                RefundMemo {
+                    address: r.address.clone(),
+                    address_n: r.address_n.clone(),
+                    mac,
+                }
+            }),
+            coin_purchase_memo: m.coin_purchase_memo.as_ref().map(|c| {
+                let mac = hex::decode(&c.mac).unwrap_or_default();
+                CoinPurchaseMemo {
+                    coin_type: c.coin_type,
+                    amount: c.amount.clone(),
+                    address: c.address.clone(),
+                    address_n: c.address_n.clone(),
+                    mac,
+                }
+            }),
+            text_details_memo: None,
+        }
+    }).collect();
+
+    let amount = pr.amount.map(|a| a.to_le_bytes().to_vec());
+
+    Ok(protos::common::PaymentRequest {
+        nonce,
+        recipient_name: pr.recipient_name.clone(),
+        memos,
+        amount,
+        signature,
+    })
 }
 
 /// Infer script type from BIP32 path.

@@ -100,6 +100,7 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
                         lock_time: non_witness_utxo.lock_time.to_consensus_u32(),
                         inputs: prev_inputs,
                         outputs: prev_outputs,
+                        extra_data: None,
                     }
                 });
             }
@@ -114,6 +115,12 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
             sequence: Some(sequence),
             orig_hash: None,
             orig_index: None,
+            multisig: None,
+            script_pubkey: None,
+            script_sig: None,
+            witness: None,
+            ownership_proof: None,
+            commitment_data: None,
         });
     }
 
@@ -150,6 +157,8 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
                 op_return_data: None,
                 orig_hash: None,
                 orig_index: None,
+                multisig: None,
+                payment_req_index: None,
             });
         } else if tx_output.script_pubkey.is_op_return() {
             // OP_RETURN output
@@ -167,6 +176,8 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
                 op_return_data: Some(data),
                 orig_hash: None,
                 orig_index: None,
+                multisig: None,
+                payment_req_index: None,
             });
         } else {
             // External output - extract address from script_pubkey
@@ -187,6 +198,8 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
                 op_return_data: None,
                 orig_hash: None,
                 orig_index: None,
+                multisig: None,
+                payment_req_index: None,
             });
         }
     }
@@ -207,6 +220,12 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
         lock_time: Some(unsigned_tx.lock_time.to_consensus_u32()),
         version: Some(unsigned_tx.version.0 as u32),
         prev_txs,
+        push: None,
+        amount_unit: None,
+        serialize: None,
+        chunkify: None,
+        unlock_path: None,
+        payment_requests: vec![],
     })
 }
 

@@ -95,6 +95,7 @@ pub mod transport;
 pub mod device;
 pub mod api;
 pub mod types;
+pub mod compose;
 
 // High-level API modules
 pub mod trezor;
