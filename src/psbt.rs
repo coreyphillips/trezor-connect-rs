@@ -71,39 +71,39 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
             .into());
         };
 
-        // For non-SegWit inputs, extract the full previous transaction
-        if psbt_input.witness_utxo.is_none() {
-            if let Some(ref non_witness_utxo) = psbt_input.non_witness_utxo {
-                let txid = tx_input.previous_output.txid.to_string();
-                prev_txs_map.entry(txid.clone()).or_insert_with(|| {
-                    let prev_inputs = non_witness_utxo
-                        .input
-                        .iter()
-                        .map(|inp| SignTxPrevTxInput {
-                            prev_hash: inp.previous_output.txid.to_string(),
-                            prev_index: inp.previous_output.vout,
-                            script_sig: hex::encode(inp.script_sig.as_bytes()),
-                            sequence: inp.sequence.0,
-                        })
-                        .collect();
-                    let prev_outputs = non_witness_utxo
-                        .output
-                        .iter()
-                        .map(|out| SignTxPrevTxOutput {
-                            amount: out.value.to_sat(),
-                            script_pubkey: hex::encode(out.script_pubkey.as_bytes()),
-                        })
-                        .collect();
-                    SignTxPrevTx {
-                        hash: txid,
-                        version: non_witness_utxo.version.0 as u32,
-                        lock_time: non_witness_utxo.lock_time.to_consensus_u32(),
-                        inputs: prev_inputs,
-                        outputs: prev_outputs,
-                        extra_data: None,
-                    }
-                });
-            }
+        // Extract the full previous transaction for Trezor verification.
+        // Trezor requires prev_txs for ALL inputs (including SegWit) to
+        // verify input amounts and prevent fee attacks.
+        if let Some(ref non_witness_utxo) = psbt_input.non_witness_utxo {
+            let txid = tx_input.previous_output.txid.to_string();
+            prev_txs_map.entry(txid.clone()).or_insert_with(|| {
+                let prev_inputs = non_witness_utxo
+                    .input
+                    .iter()
+                    .map(|inp| SignTxPrevTxInput {
+                        prev_hash: inp.previous_output.txid.to_string(),
+                        prev_index: inp.previous_output.vout,
+                        script_sig: hex::encode(inp.script_sig.as_bytes()),
+                        sequence: inp.sequence.0,
+                    })
+                    .collect();
+                let prev_outputs = non_witness_utxo
+                    .output
+                    .iter()
+                    .map(|out| SignTxPrevTxOutput {
+                        amount: out.value.to_sat(),
+                        script_pubkey: hex::encode(out.script_pubkey.as_bytes()),
+                    })
+                    .collect();
+                SignTxPrevTx {
+                    hash: txid,
+                    version: non_witness_utxo.version.0 as u32,
+                    lock_time: non_witness_utxo.lock_time.to_consensus_u32(),
+                    inputs: prev_inputs,
+                    outputs: prev_outputs,
+                    extra_data: None,
+                }
+            });
         }
 
         inputs.push(SignTxInput {
