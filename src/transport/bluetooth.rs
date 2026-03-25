@@ -106,6 +106,9 @@ pub struct BluetoothTransport {
     host_name: String,
     /// Application name for THP pairing identity
     app_name: String,
+    /// Per-device call serialization locks (path -> mutex).
+    /// Ensures only one call() is in-flight per device at a time.
+    call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl BluetoothTransport {
@@ -129,7 +132,17 @@ impl BluetoothTransport {
             pairing_callback: None,
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
+            call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Get or create the per-device call serialization lock.
+    fn get_call_lock(&self, path: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.call_locks.lock().expect("call_locks poisoned");
+        locks
+            .entry(path.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Set the pairing code callback.
@@ -1617,6 +1630,10 @@ impl Transport for BluetoothTransport {
     async fn release(&self, session: &str) -> Result<()> {
         if let Some(path) = self.sessions.get_path(session) {
             self.close(&path).await?;
+            // Clean up the call lock for this device
+            if let Ok(mut locks) = self.call_locks.lock() {
+                locks.remove(&path);
+            }
         }
         self.sessions
             .release(session)
@@ -1633,6 +1650,10 @@ impl Transport for BluetoothTransport {
             .sessions
             .get_path(session)
             .ok_or(TransportError::DeviceNotFound)?;
+
+        // Serialize all calls to the same device to prevent interleaved reads/writes
+        let lock = self.get_call_lock(&path);
+        let _guard = lock.lock().await;
 
         // Check if THP handshake is complete - if so, use encrypted messaging
         let is_paired = {
@@ -1674,6 +1695,10 @@ impl Transport for BluetoothTransport {
     }
 
     fn stop(&mut self) {
+        // Clear call serialization locks
+        if let Ok(mut locks) = self.call_locks.lock() {
+            locks.clear();
+        }
         // Disconnect all devices
         let devices = self.devices.clone();
         tokio::spawn(async move {
