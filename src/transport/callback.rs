@@ -243,6 +243,9 @@ pub struct CallbackTransport {
     app_name: String,
     /// Cache of transport type from enumerate() (path -> is_bluetooth)
     transport_type_cache: Arc<RwLock<HashMap<String, bool>>>,
+    /// Per-device call serialization locks (path -> mutex).
+    /// Ensures only one call() is in-flight per device at a time.
+    call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl CallbackTransport {
@@ -258,6 +261,7 @@ impl CallbackTransport {
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
+            call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -273,7 +277,17 @@ impl CallbackTransport {
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
+            call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Get or create the per-device call serialization lock.
+    fn get_call_lock(&self, path: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.call_locks.lock().expect("call_locks poisoned");
+        locks
+            .entry(path.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Set the pairing code callback for BLE devices
@@ -1459,6 +1473,11 @@ impl Transport for CallbackTransport {
             // Clean up BLE state
             let mut states = self.ble_states.write().await;
             states.remove(&path);
+
+            // Clean up the call lock for this device
+            if let Ok(mut locks) = self.call_locks.lock() {
+                locks.remove(&path);
+            }
         }
 
         self.sessions
@@ -1476,6 +1495,10 @@ impl Transport for CallbackTransport {
             .sessions
             .get_path(session)
             .ok_or(TransportError::DeviceNotFound)?;
+
+        // Serialize all calls to the same device to prevent interleaved reads/writes
+        let lock = self.get_call_lock(&path);
+        let _guard = lock.lock().await;
 
         // For BLE devices, use THP encrypted messaging
         if self.is_ble_device(&path).await {
@@ -1640,7 +1663,10 @@ impl Transport for CallbackTransport {
     }
 
     fn stop(&mut self) {
-        // Nothing to stop for callback transport
+        // Clear call serialization locks
+        if let Ok(mut locks) = self.call_locks.lock() {
+            locks.clear();
+        }
     }
 }
 

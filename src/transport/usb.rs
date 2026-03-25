@@ -38,6 +38,11 @@ pub struct UsbTransport {
     handles: Arc<std::sync::RwLock<HashMap<String, OpenDevice>>>,
     /// Protocol implementation
     protocol: ProtocolV1,
+    /// Per-device call serialization locks (path -> mutex).
+    /// Ensures only one call() is in-flight per device at a time.
+    /// Uses std::sync::Mutex for the outer map (held briefly, never across .await).
+    /// Uses tokio::sync::Mutex for per-device lock (held across .await to serialize calls).
+    call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl UsbTransport {
@@ -47,7 +52,17 @@ impl UsbTransport {
             sessions: SessionManager::new(),
             handles: Arc::new(std::sync::RwLock::new(HashMap::new())),
             protocol: ProtocolV1::usb(),
+            call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Get or create the per-device call serialization lock.
+    fn get_call_lock(&self, path: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.call_locks.lock().expect("call_locks poisoned");
+        locks
+            .entry(path.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Find Trezor USB devices
@@ -321,6 +336,10 @@ impl Transport for UsbTransport {
     async fn release(&self, session: &str) -> Result<()> {
         if let Some(path) = self.sessions.get_path(session) {
             self.close(&path).await?;
+            // Clean up the call lock for this device
+            if let Ok(mut locks) = self.call_locks.lock() {
+                locks.remove(&path);
+            }
         }
         self.sessions
             .release(session)
@@ -337,6 +356,10 @@ impl Transport for UsbTransport {
             .sessions
             .get_path(session)
             .ok_or(TransportError::DeviceNotFound)?;
+
+        // Serialize all calls to the same device to prevent interleaved reads/writes
+        let lock = self.get_call_lock(&path);
+        let _guard = lock.lock().await;
 
         // Encode message
         let encoded = self.protocol.encode(message_type, data)?;
@@ -442,6 +465,10 @@ impl Transport for UsbTransport {
     }
 
     fn stop(&mut self) {
+        // Clear call serialization locks
+        if let Ok(mut locks) = self.call_locks.lock() {
+            locks.clear();
+        }
         // Release all interfaces and reattach kernel drivers before clearing handles
         if let Ok(mut handles) = self.handles.write() {
             for (path, open_device) in handles.drain() {
