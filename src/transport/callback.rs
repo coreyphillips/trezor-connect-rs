@@ -295,6 +295,14 @@ impl CallbackTransport {
         self.pairing_callback = Some(callback);
     }
 
+    /// Pre-populate the transport type cache for a specific device path.
+    /// This allows callers to seed the THP flag before acquire() when enumerate()
+    /// has not been called on this transport instance.
+    pub async fn seed_transport_type(&self, path: &str, needs_thp: bool) {
+        let mut cache = self.transport_type_cache.write().await;
+        cache.insert(path.to_string(), needs_thp);
+    }
+
     /// Set the application identity used during THP pairing.
     pub fn with_app_identity(mut self, host_name: impl Into<String>, app_name: impl Into<String>) -> Self {
         self.host_name = host_name.into();
@@ -1418,7 +1426,7 @@ impl Transport for CallbackTransport {
         {
             let mut cache = self.transport_type_cache.write().await;
             for d in &devices {
-                cache.insert(d.path.clone(), d.transport_type == "bluetooth");
+                cache.insert(d.path.clone(), d.transport_type == "bluetooth" || d.transport_type == "usb-thp");
             }
         }
 
