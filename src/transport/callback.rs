@@ -1418,7 +1418,7 @@ impl Transport for CallbackTransport {
         {
             let mut cache = self.transport_type_cache.write().await;
             for d in &devices {
-                cache.insert(d.path.clone(), d.transport_type == "bluetooth");
+                cache.insert(d.path.clone(), d.transport_type == "bluetooth" || d.transport_type == "usb-thp");
             }
         }
 
