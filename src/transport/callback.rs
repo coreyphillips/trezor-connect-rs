@@ -302,6 +302,26 @@ impl CallbackTransport {
         self
     }
 
+    /// Check if a device completed a THP handshake (BLE or USB-THP).
+    pub async fn has_thp(&self, path: &str) -> bool {
+        let states = self.ble_states.read().await;
+        states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
+    }
+
+    /// Check if a device needs THP — either a known BLE device or a device
+    /// that has already completed a THP handshake (e.g., USB Safe 7).
+    async fn needs_thp(&self, path: &str) -> bool {
+        // Check if THP was already negotiated
+        {
+            let states = self.ble_states.read().await;
+            if states.contains_key(path) {
+                return true;
+            }
+        }
+        // Fall back to BLE detection
+        self.is_ble_device(path).await
+    }
+
     /// Heuristic check if a path is a BLE device (fallback when cache misses)
     fn is_ble_device_heuristic(path: &str) -> bool {
         path.starts_with("ble:") || path.contains("bluetooth")
@@ -315,6 +335,78 @@ impl CallbackTransport {
         }
         drop(cache);
         Self::is_ble_device_heuristic(path)
+    }
+
+    /// Send a Cancel message via V1 and check if device responds with
+    /// Failure_InvalidProtocol. Returns true if the device needs THP.
+    fn detect_thp_protocol(&self, path: &str) -> Result<bool> {
+        log::debug!("[Callback] Sending Cancel message for THP detection on USB device...");
+
+        let chunk_size = self.callback.get_chunk_size(path) as usize;
+        let protocol = ProtocolV1::with_chunk_size(chunk_size);
+
+        // Encode Cancel (message type 20, empty payload) via Protocol V1
+        let cancel_type: u16 = 20;
+        let encoded = protocol.encode(cancel_type, &[])?;
+        let (_, chunk_header) = protocol.get_headers(&encoded);
+        let chunks = chunk::create_chunks(&encoded, &chunk_header, chunk_size);
+
+        for c in &chunks {
+            let result = self.callback.write_chunk(path, c);
+            if !result.success {
+                return Err(TransportError::DataTransfer(result.error).into());
+            }
+        }
+
+        // Read response
+        for _ in 0..20 {
+            let read_result = self.callback.read_chunk(path);
+            if !read_result.success || read_result.data.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            let chunk = &read_result.data;
+
+            // Check for V1 header: 0x3F + 0x23 0x23
+            if chunk.len() >= 3 && chunk[0] == 0x3F && chunk[1] == 0x23 && chunk[2] == 0x23 {
+                if let Ok(decoded) = protocol.decode(chunk) {
+                    // Failure message (type 3)
+                    if decoded.message_type == 3 {
+                        // USB chunks are zero-padded and the V1 length field may
+                        // include padding, so trim trailing zeros before decoding.
+                        let header_size = crate::constants::PROTOCOL_V1_HEADER_SIZE;
+                        let available = chunk.len().saturating_sub(header_size);
+                        let payload_len = (decoded.length as usize).min(available);
+                        let raw_payload = &chunk[header_size..header_size + payload_len];
+                        let trimmed_len = raw_payload.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+                        let payload = &raw_payload[..trimmed_len];
+
+                        if let Ok(failure) = <crate::protos::common::Failure as prost::Message>::decode(payload) {
+                            if failure.code == Some(17) { // FailureInvalidProtocol
+                                log::info!("[Callback] USB device responded with Failure_InvalidProtocol — THP detected!");
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                // Any other V1 response means device speaks V1
+                log::debug!("[Callback] USB device responded with V1 protocol");
+                return Ok(false);
+            }
+
+            // Non-V1 response — likely THP
+            let ctrl = chunk[0] & 0xe7;
+            if ctrl == thp_control::CHANNEL_ALLOCATION_RES
+                || ctrl == thp_control::ERROR
+                || ctrl == thp_control::HANDSHAKE_INIT_RES
+            {
+                log::info!("[Callback] USB device responded with THP control byte 0x{:02x} — THP detected!", chunk[0]);
+                return Ok(true);
+            }
+        }
+
+        log::debug!("[Callback] No definitive protocol response, defaulting to V1");
+        Ok(false)
     }
 
     /// Write raw data to device (for THP handshake)
@@ -1448,8 +1540,10 @@ impl Transport for CallbackTransport {
             ).into());
         }
 
-        // For BLE devices, perform THP handshake
-        if self.is_ble_device(path).await {
+        let is_ble = self.is_ble_device(path).await;
+
+        // For BLE devices, always perform THP handshake
+        if is_ble {
             let needs_handshake = {
                 let states = self.ble_states.read().await;
                 !states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
@@ -1457,6 +1551,23 @@ impl Transport for CallbackTransport {
 
             if needs_handshake {
                 self.perform_thp_handshake(path).await?;
+            }
+        } else {
+            // For USB devices, detect THP via Cancel → Failure_InvalidProtocol
+            let already_thp = self.has_thp(path).await;
+            if !already_thp {
+                match self.detect_thp_protocol(path) {
+                    Ok(true) => {
+                        log::info!("[Callback] USB device needs THP — performing handshake...");
+                        self.perform_thp_handshake(path).await?;
+                    }
+                    Ok(false) => {
+                        log::debug!("[Callback] USB device uses V1 protocol");
+                    }
+                    Err(e) => {
+                        log::warn!("[Callback] THP detection failed ({}), falling back to V1", e);
+                    }
+                }
             }
         }
 
@@ -1500,8 +1611,8 @@ impl Transport for CallbackTransport {
         let lock = self.get_call_lock(&path);
         let _guard = lock.lock().await;
 
-        // For BLE devices, use THP encrypted messaging
-        if self.is_ble_device(&path).await {
+        // For THP devices (BLE or USB that negotiated THP), use encrypted messaging
+        if self.needs_thp(&path).await {
             let is_paired = {
                 let states = self.ble_states.read().await;
                 states.get(&path).map(|s| s.protocol.state().is_paired()).unwrap_or(false)
@@ -1512,7 +1623,7 @@ impl Transport for CallbackTransport {
                 return self.thp_call(&path, message_type, data).await;
             } else {
                 return Err(TransportError::DataTransfer(
-                    "BLE device not paired - handshake required".to_string()
+                    "THP device not paired - handshake required".to_string()
                 ).into());
             }
         }

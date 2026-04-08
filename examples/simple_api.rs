@@ -95,6 +95,20 @@ async fn main() -> trezor_connect_rs::Result<()> {
     // instead of returning errors.
     builder = builder.with_ui_callback(Arc::new(StdinUiCallback));
 
+    // Set pairing callback for THP devices (Safe 7 etc.) — prompts for the
+    // 6-digit code displayed on the Trezor screen during first-time pairing.
+    builder = builder.with_pairing_callback(Arc::new(|| {
+        Box::pin(async {
+            println!("\n--- THP Pairing Code Required ---");
+            println!("Enter the 6-digit code shown on your Trezor:");
+            print!("Code: ");
+            io::stdout().flush().unwrap();
+            let mut code = String::new();
+            io::stdin().read_line(&mut code).unwrap();
+            code.trim().to_string()
+        })
+    }));
+
     let mut trezor = builder.build().await?;
 
     // Scan for devices
