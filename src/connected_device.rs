@@ -34,6 +34,8 @@ pub struct ConnectedDevice {
     features: Option<Features>,
     /// Optional UI callback for PIN/passphrase input
     ui_callback: Option<Arc<dyn TrezorUiCallback>>,
+    /// Whether this device uses THP (detected at acquire time, regardless of transport)
+    uses_thp: bool,
 }
 
 impl ConnectedDevice {
@@ -54,7 +56,15 @@ impl ConnectedDevice {
             session,
             features: None,
             ui_callback: None,
+            uses_thp: false,
         }
+    }
+
+    /// Mark this device as using THP protocol (detected during acquire).
+    /// When set, initialize() will use GetFeatures instead of Initialize,
+    /// since the THP session was already created during the handshake.
+    pub fn set_uses_thp(&mut self, uses_thp: bool) {
+        self.uses_thp = uses_thp;
     }
 
     /// Set the UI callback for handling PIN and passphrase requests.
@@ -81,16 +91,14 @@ impl ConnectedDevice {
     ///
     /// This should be called after connecting to get device information.
     ///
-    /// For USB devices, this sends the Initialize message.
-    /// For Bluetooth (THP) devices, this sends GetFeatures since the THP session
+    /// For V1 protocol devices, this sends the Initialize message.
+    /// For THP devices (any transport), this sends GetFeatures since the THP session
     /// was already created during connection via ThpCreateNewSession.
     pub async fn initialize(&mut self) -> Result<Features> {
-        use crate::device_info::TransportType;
-
-        let (resp_type, resp_data) = if self.info.transport_type == TransportType::Bluetooth {
+        let (resp_type, resp_data) = if self.uses_thp {
             // For THP devices, use GetFeatures since session is already initialized
             // via ThpCreateNewSession during acquire()
-            log::debug!("[Device] Using GetFeatures for Bluetooth/THP device");
+            log::debug!("[Device] Using GetFeatures for THP device");
             let get_features = protos::management::GetFeatures::default();
             self.transport.call(
                 &self.session,
@@ -98,8 +106,8 @@ impl ConnectedDevice {
                 &get_features.encode_to_vec(),
             ).await?
         } else {
-            // For USB devices, use Initialize
-            log::debug!("[Device] Using Initialize for USB device");
+            // For V1 devices, use Initialize
+            log::debug!("[Device] Using Initialize for V1 device");
             let init = protos::management::Initialize::default();
             self.transport.call(
                 &self.session,

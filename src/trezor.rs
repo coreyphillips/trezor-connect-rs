@@ -172,6 +172,20 @@ impl TrezorBuilder {
         let usb_transport = if self.scan_usb {
             match UsbTransport::new() {
                 Ok(mut transport) => {
+                    // Wire pairing callback for USB THP (Safe 7 etc.)
+                    if let Some(ref cb) = self.pairing_callback {
+                        let cb = cb.clone();
+                        transport.set_pairing_callback(Arc::new(move || {
+                            // Block on the async callback to get the pairing code synchronously.
+                            // UsbTransport pairing runs inside an async context so we use
+                            // tokio::task::block_in_place + Handle::block_on.
+                            let cb = cb.clone();
+                            let handle = tokio::runtime::Handle::current();
+                            std::thread::spawn(move || {
+                                handle.block_on(cb())
+                            }).join().unwrap_or_default()
+                        }));
+                    }
                     let _ = transport.init().await;
                     Some(Arc::new(transport))
                 }
@@ -332,14 +346,21 @@ impl Trezor {
         let transport = self.usb_transport.as_ref()
             .ok_or_else(|| TransportError::Usb("USB transport not initialized".to_string()))?;
 
-        // Acquire session
+        // Acquire session (this also detects THP and performs handshake if needed)
         let session = transport.acquire(&device.path, None).await?;
+
+        // Check if device negotiated THP during acquire
+        let uses_thp = transport.has_thp(&device.path).await;
 
         let mut connected = ConnectedDevice::new(
             device.clone(),
             Box::new(TransportWrapper::Usb(Arc::clone(transport))),
             session,
         );
+
+        if uses_thp {
+            connected.set_uses_thp(true);
+        }
 
         if let Some(ref cb) = self.ui_callback {
             connected.set_ui_callback(cb.clone());
@@ -416,6 +437,9 @@ impl Trezor {
             transport_box,
             session,
         );
+
+        // Bluetooth always uses THP
+        connected.set_uses_thp(true);
 
         if let Some(ref cb) = self.ui_callback {
             connected.set_ui_callback(cb.clone());
