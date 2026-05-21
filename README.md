@@ -19,7 +19,7 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 
 ```toml
 [dependencies]
-trezor-connect-rs = "0.2"
+trezor-connect-rs = "0.3.0"
 ```
 
 ### Feature Flags
