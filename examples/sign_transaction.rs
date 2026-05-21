@@ -6,7 +6,7 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 use trezor_connect_rs::{
-    TrezorClient, UsbTransport, Result, TrezorUiCallback,
+    TrezorClient, UsbTransport, Result, TrezorUiCallback, PassphraseResponse,
     api::sign_tx::{SignTransactionParams, TxInput, TxOutput},
     transport::Transport,
 };
@@ -25,16 +25,20 @@ impl TrezorUiCallback for StdinUiCallback {
         if pin.is_empty() { None } else { Some(pin) }
     }
 
-    fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+    fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse {
         if on_device {
             println!("\nPlease enter the passphrase on your Trezor device.");
-            Some(String::new())
+            return PassphraseResponse::Standard;
+        }
+        print!("\nEnter passphrase (leave empty for none): ");
+        io::stdout().flush().unwrap();
+        let mut passphrase = String::new();
+        io::stdin().read_line(&mut passphrase).unwrap();
+        let passphrase = passphrase.trim().to_string();
+        if passphrase.is_empty() {
+            PassphraseResponse::Standard
         } else {
-            print!("\nEnter passphrase (leave empty for none): ");
-            io::stdout().flush().unwrap();
-            let mut passphrase = String::new();
-            io::stdin().read_line(&mut passphrase).unwrap();
-            Some(passphrase.trim().to_string())
+            PassphraseResponse::Hidden { value: passphrase }
         }
     }
 }
