@@ -19,7 +19,7 @@
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
-//! use trezor_connect_rs::{Trezor, GetAddressParams, TrezorUiCallback};
+//! use trezor_connect_rs::{Trezor, GetAddressParams, TrezorUiCallback, PassphraseResponse};
 //!
 //! /// Implement this trait to handle PIN/passphrase prompts from your UI.
 //! struct MyUiCallback;
@@ -28,8 +28,10 @@
 //!         // Show PIN matrix UI, return the entered PIN or None to cancel
 //!         Some("123456".to_string())
 //!     }
-//!     fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
-//!         if on_device { Some(String::new()) } else { Some(String::new()) }
+//!     fn on_passphrase_request(&self, _on_device: bool) -> PassphraseResponse {
+//!         // Standard wallet (no passphrase). For a hidden wallet, return
+//!         // PassphraseResponse::Hidden { value: ... }; to abort, return Cancel.
+//!         PassphraseResponse::Standard
 //!     }
 //! }
 //!
@@ -122,7 +124,7 @@ pub use device_info::{DeviceInfo, TransportType};
 pub use params::*;
 pub use responses::*;
 pub use credential_store::{CredentialStore, StoredCredential};
-pub use ui_callback::TrezorUiCallback;
+pub use ui_callback::{TrezorUiCallback, PassphraseResponse};
 
 // Re-export low-level API for advanced users
 pub use device::TrezorClient;

@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use trezor_connect_rs::{
     Trezor, GetAddressParams, GetPublicKeyParams, SignMessageParams, VerifyMessageParams,
-    TrezorUiCallback,
+    TrezorUiCallback, PassphraseResponse,
 };
 
 /// UI callback that prompts for PIN and passphrase via stdin.
@@ -40,20 +40,24 @@ impl TrezorUiCallback for StdinUiCallback {
         }
     }
 
-    fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+    fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse {
         if on_device {
             println!("\n--- Passphrase Required ---");
             println!("Please enter the passphrase on your Trezor device.");
-            // Return Some to acknowledge; the device handles input.
-            Some(String::new())
-        } else {
-            println!("\n--- Passphrase Required ---");
-            print!("Enter passphrase (leave empty for none): ");
-            io::stdout().flush().unwrap();
+            return PassphraseResponse::Standard;
+        }
 
-            let mut passphrase = String::new();
-            io::stdin().read_line(&mut passphrase).unwrap();
-            Some(passphrase.trim().to_string())
+        println!("\n--- Passphrase Required ---");
+        print!("Enter passphrase (leave empty for none): ");
+        io::stdout().flush().unwrap();
+
+        let mut passphrase = String::new();
+        io::stdin().read_line(&mut passphrase).unwrap();
+        let passphrase = passphrase.trim().to_string();
+        if passphrase.is_empty() {
+            PassphraseResponse::Standard
+        } else {
+            PassphraseResponse::Hidden { value: passphrase }
         }
     }
 }

@@ -253,37 +253,6 @@ impl ThpState {
         Ok(())
     }
 
-    /// Synchronize state after message
-    pub fn sync(&mut self, is_send: bool, message_type: &str) {
-        // Don't update sync bit for channel allocation messages
-        let update_sync_bit = !matches!(
-            message_type,
-            "ThpCreateChannelRequest" | "ThpCreateChannelResponse"
-        );
-
-        if update_sync_bit {
-            self.update_ack_bit(is_send);
-            self.update_sync_bit(is_send);
-        }
-
-        // Don't update nonce for handshake messages
-        let update_nonce = update_sync_bit
-            && !matches!(
-                message_type,
-                "ThpHandshakeInitRequest"
-                    | "ThpHandshakeInitResponse"
-                    | "ThpHandshakeCompletionRequest"
-                    | "ThpHandshakeCompletionResponse"
-            );
-
-        if update_nonce {
-            if let Err(e) = self.update_nonce(is_send) {
-                log::error!("[THP] Nonce overflow in sync: {}", e);
-                self.nonce_exhausted = true;
-            }
-        }
-    }
-
     /// Get expected responses
     pub fn expected_responses(&self) -> &[u8] {
         &self.expected_responses

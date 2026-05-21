@@ -152,6 +152,10 @@ pub enum DeviceError {
     #[error("Passphrase is required")]
     PassphraseRequired,
 
+    /// Passphrase entry cancelled
+    #[error("Passphrase entry cancelled")]
+    PassphraseCancelled,
+
     /// Device is not initialized
     #[error("Device is not initialized")]
     NotInitialized,

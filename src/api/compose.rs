@@ -769,7 +769,7 @@ mod tests {
     #[ignore]
     async fn test_compose_and_sign_with_device() {
         use std::sync::Arc;
-        use crate::{Trezor, TrezorUiCallback};
+        use crate::{Trezor, TrezorUiCallback, PassphraseResponse};
 
         struct TestUiCallback;
         impl TrezorUiCallback for TestUiCallback {
@@ -777,14 +777,13 @@ mod tests {
                 println!("PIN requested - returning None (no PIN expected on test device)");
                 None
             }
-            fn on_passphrase_request(&self, on_device: bool) -> Option<String> {
+            fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse {
                 if on_device {
                     println!("Passphrase on device requested");
-                    Some(String::new())
                 } else {
-                    println!("Passphrase requested - returning empty (no passphrase)");
-                    Some(String::new())
+                    println!("Passphrase requested - returning Standard (no passphrase)");
                 }
+                PassphraseResponse::Standard
             }
         }
 

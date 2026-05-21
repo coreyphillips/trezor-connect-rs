@@ -1079,24 +1079,26 @@ impl ConnectedDevice {
                             continue;
                         }
 
-                        match cb.on_passphrase_request(false) {
-                            Some(passphrase) => {
-                                let ack = protos::PassphraseAck {
-                                    passphrase: Some(passphrase),
-                                    state: None,
-                                    on_device: None,
-                                };
-                                let (next_type, next_data) = self.transport.call(
-                                    &self.session,
-                                    MessageType::PassphraseAck as u16,
-                                    &ack.encode_to_vec(),
-                                ).await?;
-                                current_type = next_type;
-                                current_data = next_data;
-                                continue;
+                        let passphrase = match cb.on_passphrase_request(false) {
+                            crate::ui_callback::PassphraseResponse::Cancel => {
+                                return Err(DeviceError::PassphraseCancelled.into());
                             }
-                            None => return Err(DeviceError::PassphraseRequired.into()),
-                        }
+                            crate::ui_callback::PassphraseResponse::Standard => String::new(),
+                            crate::ui_callback::PassphraseResponse::Hidden { value } => value,
+                        };
+                        let ack = protos::PassphraseAck {
+                            passphrase: Some(passphrase),
+                            state: None,
+                            on_device: None,
+                        };
+                        let (next_type, next_data) = self.transport.call(
+                            &self.session,
+                            MessageType::PassphraseAck as u16,
+                            &ack.encode_to_vec(),
+                        ).await?;
+                        current_type = next_type;
+                        current_data = next_data;
+                        continue;
                     }
                     return Err(DeviceError::PassphraseRequired.into());
                 }
