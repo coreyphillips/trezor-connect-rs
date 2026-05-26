@@ -1,6 +1,6 @@
 [package]
 name = "trezor-connect-rs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/coreyphillips/trezor-connect-rs"
@@ -91,3 +91,7 @@ path = "examples/bluetooth_connect.rs"
 [[example]]
 name = "simple_api"
 path = "examples/simple_api.rs"
+
+[[example]]
+name = "hidden_passphrase"
+path = "examples/hidden_passphrase.rs"

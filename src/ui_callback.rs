@@ -5,20 +5,24 @@
 
 /// Response variants for an `on_passphrase_request` callback.
 ///
-/// Trezor's passphrase protocol distinguishes three cases that a single
+/// Trezor's passphrase protocol distinguishes several cases that a single
 /// `Option<String>` return value cannot represent unambiguously: a standard
-/// wallet (no passphrase) is `Some("")` to the device, while user cancel is
-/// `None`. Modeling them as a typed enum makes the contract self-documenting
-/// at the callback boundary.
+/// wallet (no passphrase) is `Some("")` to the device, user cancel is `None`,
+/// and on-device entry is signalled with no passphrase but `on_device = true`.
+/// Modeling them as a typed enum makes the contract self-documenting at the
+/// callback boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PassphraseResponse {
     /// User cancelled — aborts the pending operation.
     Cancel,
     /// Standard wallet — no passphrase, equivalent to `Some("")` on the device.
-    /// Also the correct response when `on_device` is true.
     Standard,
-    /// Hidden wallet — derived from the supplied passphrase.
+    /// Hidden wallet — derived from the passphrase entered on the host.
     Hidden { value: String },
+    /// Enter the passphrase on the Trezor device itself instead of on the host.
+    /// The library acks with `on_device = true`, the Trezor shows its own
+    /// passphrase keyboard, and the passphrase never touches the host.
+    OnDevice,
 }
 
 /// Callback trait for handling PIN and passphrase requests from the device.
@@ -40,10 +44,10 @@ pub enum PassphraseResponse {
 ///
 ///     fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse {
 ///         if on_device {
-///             // User will enter on device; Standard acknowledges the prompt
-///             PassphraseResponse::Standard
+///             // Device wants entry on the Trezor itself; defer to it.
+///             PassphraseResponse::OnDevice
 ///         } else {
-///             // Show passphrase input UI
+///             // Show a passphrase input UI on the host
 ///             PassphraseResponse::Hidden { value: "my passphrase".to_string() }
 ///         }
 ///     }
@@ -57,12 +61,16 @@ pub trait TrezorUiCallback: Send + Sync {
 
     /// Called when the device requests a passphrase.
     ///
+    /// `on_device` is `true` when the device asks for the passphrase to be
+    /// entered on the Trezor itself (e.g. it is configured for on-device entry);
+    /// in that case return [`PassphraseResponse::OnDevice`].
+    ///
     /// Return one of:
     /// - [`PassphraseResponse::Cancel`] to abort the operation.
-    /// - [`PassphraseResponse::Standard`] for a standard (no-passphrase) wallet,
-    ///   or to acknowledge when `on_device` is true and the user will type on
-    ///   the Trezor itself.
-    /// - [`PassphraseResponse::Hidden`] with the user-entered passphrase to
+    /// - [`PassphraseResponse::Standard`] for a standard (no-passphrase) wallet.
+    /// - [`PassphraseResponse::Hidden`] with the host-entered passphrase to
     ///   open a hidden wallet.
+    /// - [`PassphraseResponse::OnDevice`] to have the user type the passphrase
+    ///   on the Trezor instead of on the host.
     fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse;
 }

@@ -1060,36 +1060,36 @@ impl ConnectedDevice {
                     if let Some(ref cb) = self.ui_callback {
                         let request = protos::PassphraseRequest::decode(current_data.as_slice())
                             .unwrap_or_default();
+                        // `on_device` reflects whether the device is asking for the
+                        // passphrase to be entered on the Trezor itself; the callback
+                        // decides how to respond (host entry, on-device, or cancel).
                         let on_device = request.on_device.unwrap_or(false);
 
-                        if on_device {
-                            // User enters passphrase on device
-                            let ack = protos::PassphraseAck {
-                                passphrase: None,
-                                state: None,
-                                on_device: Some(true),
-                            };
-                            let (next_type, next_data) = self.transport.call(
-                                &self.session,
-                                MessageType::PassphraseAck as u16,
-                                &ack.encode_to_vec(),
-                            ).await?;
-                            current_type = next_type;
-                            current_data = next_data;
-                            continue;
-                        }
-
-                        let passphrase = match cb.on_passphrase_request(false) {
+                        let ack = match cb.on_passphrase_request(on_device) {
                             crate::ui_callback::PassphraseResponse::Cancel => {
                                 return Err(DeviceError::PassphraseCancelled.into());
                             }
-                            crate::ui_callback::PassphraseResponse::Standard => String::new(),
-                            crate::ui_callback::PassphraseResponse::Hidden { value } => value,
-                        };
-                        let ack = protos::PassphraseAck {
-                            passphrase: Some(passphrase),
-                            state: None,
-                            on_device: None,
+                            crate::ui_callback::PassphraseResponse::Standard => {
+                                protos::PassphraseAck {
+                                    passphrase: Some(String::new()),
+                                    state: None,
+                                    on_device: None,
+                                }
+                            }
+                            crate::ui_callback::PassphraseResponse::Hidden { value } => {
+                                protos::PassphraseAck {
+                                    passphrase: Some(value),
+                                    state: None,
+                                    on_device: None,
+                                }
+                            }
+                            crate::ui_callback::PassphraseResponse::OnDevice => {
+                                protos::PassphraseAck {
+                                    passphrase: None,
+                                    state: None,
+                                    on_device: Some(true),
+                                }
+                            }
                         };
                         let (next_type, next_data) = self.transport.call(
                             &self.session,

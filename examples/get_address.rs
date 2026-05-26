@@ -25,7 +25,7 @@ impl TrezorUiCallback for StdinUiCallback {
     fn on_passphrase_request(&self, on_device: bool) -> PassphraseResponse {
         if on_device {
             println!("\nPlease enter the passphrase on your Trezor device.");
-            return PassphraseResponse::Standard;
+            return PassphraseResponse::OnDevice;
         }
         print!("\nEnter passphrase (leave empty for none): ");
         io::stdout().flush().unwrap();

@@ -246,6 +246,13 @@ pub struct CallbackTransport {
     /// Per-device call serialization locks (path -> mutex).
     /// Ensures only one call() is in-flight per device at a time.
     call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Passphrase bound to the THP session at `ThpCreateNewSession` time.
+    /// Empty string opens the standard wallet. Ignored when
+    /// `session_on_device` is true (the device prompts on its own screen).
+    session_passphrase: String,
+    /// When true, the THP session is created with `on_device = true` so the
+    /// user enters the passphrase on the Trezor instead of the host.
+    session_on_device: bool,
 }
 
 impl CallbackTransport {
@@ -262,6 +269,8 @@ impl CallbackTransport {
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_passphrase: String::new(),
+            session_on_device: false,
         }
     }
 
@@ -278,7 +287,20 @@ impl CallbackTransport {
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_passphrase: String::new(),
+            session_on_device: false,
         }
+    }
+
+    /// Set the passphrase bound to the THP session created during `acquire()`.
+    ///
+    /// `passphrase` opens the corresponding hidden wallet (empty = standard).
+    /// When `on_device` is true the passphrase is entered on the Trezor itself
+    /// and `passphrase` is ignored. Must be called before `acquire()`.
+    pub fn with_session_passphrase(mut self, passphrase: String, on_device: bool) -> Self {
+        self.session_passphrase = passphrase;
+        self.session_on_device = on_device;
+        self
     }
 
     /// Get or create the per-device call serialization lock.
@@ -1448,34 +1470,61 @@ impl CallbackTransport {
             }
         }
 
-        let session_payload = encode_create_new_session(Some(""), false);
+        // Bind the configured passphrase to the session. For on-device entry the
+        // passphrase field is omitted (firmware rejects empty-passphrase +
+        // on_device); the Trezor then prompts on its own screen. Otherwise an
+        // empty passphrase opens the standard wallet and a non-empty one a hidden
+        // wallet.
+        let passphrase_opt = if self.session_on_device {
+            None
+        } else {
+            Some(self.session_passphrase.as_str())
+        };
+        let session_payload = encode_create_new_session(passphrase_opt, self.session_on_device);
+        log::info!(
+            "[Callback] ThpCreateNewSession (passphrase_len={}, on_device={})",
+            self.session_passphrase.len(),
+            self.session_on_device,
+        );
 
-        let (resp_type, resp_data) = self.send_encrypted_message(
+        let (mut resp_type, mut resp_data) = self.send_encrypted_message(
             path,
             channel,
             THP_CREATE_NEW_SESSION,
             &session_payload,
         ).await?;
 
-        // Handle ButtonRequest
-        let (final_type, _final_data) = if resp_type == crate::constants::message_type::BUTTON_REQUEST {
+        // The device may emit one or more ButtonRequests before completing —
+        // e.g. confirming the passphrase, or showing its on-device keyboard.
+        // Acknowledge each until the device returns the final Success/Failure.
+        while resp_type == crate::constants::message_type::BUTTON_REQUEST {
+            log::debug!("[Callback] ThpCreateNewSession: ButtonRequest, acking");
             let (next_type, next_data) = self.send_encrypted_message(
                 path,
                 channel,
                 crate::constants::message_type::BUTTON_ACK,
                 &[],
             ).await?;
-            (next_type, next_data)
-        } else {
-            (resp_type, resp_data)
-        };
+            resp_type = next_type;
+            resp_data = next_data;
+        }
 
         const SUCCESS_MESSAGE_TYPE: u16 = 2;
-        if final_type == SUCCESS_MESSAGE_TYPE {
+        const FAILURE_MESSAGE_TYPE: u16 = 3;
+        if resp_type == SUCCESS_MESSAGE_TYPE {
             log::info!("[Callback] THP session created successfully!");
             Ok(())
+        } else if resp_type == FAILURE_MESSAGE_TYPE {
+            // Decode the device's reason so the failure is actionable.
+            let detail = <crate::protos::common::Failure as prost::Message>::decode(
+                resp_data.as_slice(),
+            )
+            .map(|f| format!("code={:?}, message={}", f.code, f.message()))
+            .unwrap_or_else(|_| "undecodable Failure".to_string());
+            log::warn!("[Callback] ThpCreateNewSession rejected: {}", detail);
+            Err(ThpError::SessionError(format!("ThpCreateNewSession rejected ({})", detail)).into())
         } else {
-            Err(ThpError::SessionError(format!("Unexpected response: {}", final_type)).into())
+            Err(ThpError::SessionError(format!("Unexpected response: {}", resp_type)).into())
         }
     }
 

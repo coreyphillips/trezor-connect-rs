@@ -207,6 +207,19 @@ impl TrezorBuilder {
             match BluetoothTransport::new().await {
                 Ok(mut transport) => {
                     transport.set_app_identity(&self.host_name, &self.app_name);
+                    // Wire pairing callback for BLE THP (Safe 7 etc.)
+                    if let Some(ref cb) = self.pairing_callback {
+                        let cb = cb.clone();
+                        transport.set_pairing_callback(Arc::new(move || {
+                            // Block on the async callback to get the pairing code
+                            // synchronously, mirroring the USB transport above.
+                            let cb = cb.clone();
+                            let handle = tokio::runtime::Handle::current();
+                            std::thread::spawn(move || {
+                                handle.block_on(cb())
+                            }).join().unwrap_or_default()
+                        }));
+                    }
                     let _ = transport.init().await;
                     Some(Arc::new(transport))
                 }
@@ -228,7 +241,6 @@ impl TrezorBuilder {
             #[cfg(feature = "bluetooth")]
             ble_transport,
             credential_store,
-            pairing_callback: self.pairing_callback,
             ui_callback: self.ui_callback,
             scan_duration: self.scan_duration,
         })
@@ -256,7 +268,6 @@ pub struct Trezor {
     #[cfg(feature = "bluetooth")]
     ble_transport: Option<Arc<BluetoothTransport>>,
     credential_store: Option<CredentialStore>,
-    pairing_callback: Option<PairingCallback>,
     ui_callback: Option<Arc<dyn TrezorUiCallback>>,
     scan_duration: std::time::Duration,
 }
