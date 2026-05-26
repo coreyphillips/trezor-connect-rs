@@ -211,6 +211,13 @@ cargo run --example simple_api
 # With OS keychain credential storage
 cargo run --example simple_api --features os-keychain
 
+# Use a hidden (passphrase-protected) wallet.
+# Prompts whether to enter the passphrase on the host or on the Trezor's screen.
+cargo run --example hidden_passphrase
+
+# For host entry you can pre-supply the passphrase value instead of being prompted:
+TREZOR_PASSPHRASE="my secret" cargo run --example hidden_passphrase
+
 # USB-specific examples (low-level TrezorClient API)
 cargo run --example get_address
 cargo run --example sign_message
@@ -223,6 +230,7 @@ cargo run --example bluetooth_connect
 | Example | Transport | API Level | Description |
 |---------|-----------|-----------|-------------|
 | `simple_api` | USB + BLE | High-level | Full demo: scan, connect, get address, sign/verify message |
+| `hidden_passphrase` | USB + BLE | High-level | Unlock a hidden (passphrase-protected) wallet via host or on-device entry |
 | `get_address` | USB | Low-level | Get a native SegWit address |
 | `sign_message` | USB | Low-level | Sign and verify a message |
 | `sign_transaction` | USB | Low-level | Sign a Bitcoin transaction |

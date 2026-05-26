@@ -44,7 +44,7 @@ impl TrezorUiCallback for StdinUiCallback {
         if on_device {
             println!("\n--- Passphrase Required ---");
             println!("Please enter the passphrase on your Trezor device.");
-            return PassphraseResponse::Standard;
+            return PassphraseResponse::OnDevice;
         }
 
         println!("\n--- Passphrase Required ---");

@@ -245,15 +245,20 @@ pub(crate) fn decode_varint(data: &[u8]) -> Result<(u64, usize)> {
 
 /// Encode a ThpCreateNewSession message
 /// Fields: passphrase (1, string), on_device (2, bool)
-/// For simple session creation with no passphrase, we can send an empty passphrase.
+///
+/// `passphrase` is genuinely optional: pass `Some("")` for the standard wallet,
+/// `Some(value)` for a host-entered hidden wallet, or `None` for on-device entry
+/// (`on_device = true`). The passphrase field is omitted entirely when `None` —
+/// firmware rejects an empty passphrase combined with `on_device = true`.
 pub fn encode_create_new_session(passphrase: Option<&str>, on_device: bool) -> Vec<u8> {
     let mut data = Vec::new();
 
-    // Field 1: passphrase (string) - send empty string if None
-    let passphrase = passphrase.unwrap_or("");
-    data.push(0x0a); // field 1, wire type 2 (length-delimited)
-    encode_varint(&mut data, passphrase.len() as u64);
-    data.extend_from_slice(passphrase.as_bytes());
+    // Field 1: passphrase (string) - omitted entirely when None
+    if let Some(passphrase) = passphrase {
+        data.push(0x0a); // field 1, wire type 2 (length-delimited)
+        encode_varint(&mut data, passphrase.len() as u64);
+        data.extend_from_slice(passphrase.as_bytes());
+    }
 
     // Field 2: on_device (bool) - only include if true
     if on_device {
