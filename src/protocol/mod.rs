@@ -6,9 +6,9 @@
 //! - **Protocol v1** - Legacy unencrypted protocol (USB)
 //! - **Protocol v2 (THP)** - Encrypted Trezor Host Protocol (Bluetooth/Safe 7)
 
-pub mod v1;
-pub mod thp;
 pub mod chunk;
+pub mod thp;
+pub mod v1;
 
 use crate::error::Result;
 

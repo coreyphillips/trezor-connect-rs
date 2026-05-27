@@ -5,11 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::compose::{
-    self, ComposeInput, ComposeOutput as InternalComposeOutput,
-    ComposeRequest, ComposeResult, ComposeError,
-};
 use crate::compose::sorting::SortingStrategy;
+use crate::compose::{
+    self, ComposeError, ComposeInput, ComposeOutput as InternalComposeOutput, ComposeRequest,
+    ComposeResult,
+};
 use crate::types::bitcoin::ScriptType;
 
 /// Fee level for precompose.
@@ -143,9 +143,7 @@ pub enum PrecomposedResult {
     },
     /// Composition failed
     #[serde(rename = "error")]
-    Error {
-        error: String,
-    },
+    Error { error: String },
 }
 
 /// Input in a precomposed result.
@@ -166,7 +164,12 @@ pub enum PrecomposedOutput {
     #[serde(rename = "payment")]
     Payment { address: String, amount: String },
     #[serde(rename = "change")]
-    Change { address: String, path: String, amount: String, script_type: ScriptType },
+    Change {
+        address: String,
+        path: String,
+        amount: String,
+        script_type: ScriptType,
+    },
     #[serde(rename = "opreturn")]
     OpReturn { data_hex: String },
 }
@@ -192,7 +195,9 @@ pub fn precomposed_input_to_sign_input(input: &PrecomposedInput) -> crate::param
 }
 
 /// Convert a `PrecomposedOutput` to a `SignTxOutput` for device signing.
-pub fn precomposed_output_to_sign_output(output: &PrecomposedOutput) -> crate::params::SignTxOutput {
+pub fn precomposed_output_to_sign_output(
+    output: &PrecomposedOutput,
+) -> crate::params::SignTxOutput {
     match output {
         PrecomposedOutput::Payment { address, amount } => crate::params::SignTxOutput {
             address: Some(address.clone()),
@@ -205,7 +210,12 @@ pub fn precomposed_output_to_sign_output(output: &PrecomposedOutput) -> crate::p
             multisig: None,
             payment_req_index: None,
         },
-        PrecomposedOutput::Change { address: _, path, amount, script_type } => crate::params::SignTxOutput {
+        PrecomposedOutput::Change {
+            address: _,
+            path,
+            amount,
+            script_type,
+        } => crate::params::SignTxOutput {
             address: None,
             path: Some(path.clone()),
             amount: amount.parse().unwrap_or(0),
@@ -242,7 +252,10 @@ pub fn precomposed_final_to_sign_params(
 ) -> crate::params::SignTxParams {
     crate::params::SignTxParams {
         inputs: inputs.iter().map(precomposed_input_to_sign_input).collect(),
-        outputs: outputs.iter().map(precomposed_output_to_sign_output).collect(),
+        outputs: outputs
+            .iter()
+            .map(precomposed_output_to_sign_output)
+            .collect(),
         coin,
         ..Default::default()
     }
@@ -273,132 +286,168 @@ pub fn precompose(params: PrecomposeParams) -> Vec<PrecomposedResult> {
     let sorting = params.sorting_strategy.unwrap_or_default();
 
     // Get the first unused change address
-    let change_address = params.account.addresses.change
+    let change_address = params
+        .account
+        .addresses
+        .change
         .iter()
         .find(|a| a.transfers == 0)
         .or(params.account.addresses.change.first());
 
-    params.fee_levels.iter().map(|level| {
-        let fee_rate: f64 = level.fee_per_unit.parse().unwrap_or(0.0);
-        if fee_rate <= 0.0 || !fee_rate.is_finite() {
-            return PrecomposedResult::Error {
-                error: ComposeError::IncorrectFeeRate.to_string(),
-            };
-        }
+    params
+        .fee_levels
+        .iter()
+        .map(|level| {
+            let fee_rate: f64 = level.fee_per_unit.parse().unwrap_or(0.0);
+            if fee_rate <= 0.0 || !fee_rate.is_finite() {
+                return PrecomposedResult::Error {
+                    error: ComposeError::IncorrectFeeRate.to_string(),
+                };
+            }
 
-        // Convert UTXOs to ComposeInput — let coin selection algorithms handle input economics
-        let inputs: Vec<ComposeInput> = params.account.utxo.iter().map(|u| {
-            let required = u.required.unwrap_or(false);
-            ComposeInput {
-                txid: u.txid.clone(),
-                vout: u.vout,
-                amount: u.amount,
-                address: u.address.clone(),
-                path: u.path.clone(),
-                confirmations: u.confirmations,
-                coinbase: u.coinbase,
-                own: u.own,
-                required,
-                script_type: crate::compose::script_type_from_address(&u.address),
-            }
-        }).collect();
-
-        // Convert outputs
-        let outputs: Vec<InternalComposeOutput> = params.outputs.iter().map(|o| match o {
-            PrecomposeOutput::Payment { address, amount } => {
-                InternalComposeOutput::Payment {
-                    address: address.clone(),
-                    amount: amount.parse().unwrap_or(0),
-                }
-            }
-            PrecomposeOutput::PaymentNoAddress { amount } => {
-                InternalComposeOutput::PaymentNoAddress {
-                    amount: amount.parse().unwrap_or(0),
-                }
-            }
-            PrecomposeOutput::SendMax { address } => {
-                InternalComposeOutput::SendMax { address: address.clone() }
-            }
-            PrecomposeOutput::SendMaxNoAddress => {
-                InternalComposeOutput::SendMaxNoAddress
-            }
-            PrecomposeOutput::OpReturn { data_hex } => {
-                InternalComposeOutput::OpReturn { data_hex: data_hex.clone() }
-            }
-        }).collect();
-
-        let base_fee = level.base_fee.unwrap_or(0);
-
-        let request = ComposeRequest {
-            inputs,
-            outputs,
-            fee_rate,
-            base_fee,
-            change_script_type,
-            sorting_strategy: sorting,
-            sequence: params.sequence,
-        };
-
-        match compose::compose_tx(request) {
-            ComposeResult::Final { total_spent, fee, fee_per_byte, bytes, inputs, outputs, outputs_permutation } => {
-                let precomposed_inputs: Vec<PrecomposedInput> = inputs.iter().map(|i| {
-                    PrecomposedInput {
-                        txid: i.txid.clone(),
-                        vout: i.vout,
-                        amount: i.amount.to_string(),
-                        address: i.address.clone(),
-                        path: i.path.clone(),
-                        script_type: i.script_type,
+            // Convert UTXOs to ComposeInput — let coin selection algorithms handle input economics
+            let inputs: Vec<ComposeInput> = params
+                .account
+                .utxo
+                .iter()
+                .map(|u| {
+                    let required = u.required.unwrap_or(false);
+                    ComposeInput {
+                        txid: u.txid.clone(),
+                        vout: u.vout,
+                        amount: u.amount,
+                        address: u.address.clone(),
+                        path: u.path.clone(),
+                        confirmations: u.confirmations,
+                        coinbase: u.coinbase,
+                        own: u.own,
+                        required,
+                        script_type: crate::compose::script_type_from_address(&u.address),
                     }
-                }).collect();
+                })
+                .collect();
 
-                let precomposed_outputs: Vec<PrecomposedOutput> = outputs.iter().map(|o| match o {
-                    compose::ComposedOutput::Payment { address, amount } => {
-                        PrecomposedOutput::Payment {
+            // Convert outputs
+            let outputs: Vec<InternalComposeOutput> = params
+                .outputs
+                .iter()
+                .map(|o| match o {
+                    PrecomposeOutput::Payment { address, amount } => {
+                        InternalComposeOutput::Payment {
                             address: address.clone(),
-                            amount: amount.to_string(),
+                            amount: amount.parse().unwrap_or(0),
                         }
                     }
-                    compose::ComposedOutput::Change { amount, script_type, .. } => {
-                        let (addr, path) = change_address
-                            .map(|a| (a.address.clone(), a.path.clone()))
-                            .unwrap_or_default();
-                        PrecomposedOutput::Change {
-                            address: addr,
-                            path,
-                            amount: amount.to_string(),
-                            script_type: *script_type,
+                    PrecomposeOutput::PaymentNoAddress { amount } => {
+                        InternalComposeOutput::PaymentNoAddress {
+                            amount: amount.parse().unwrap_or(0),
                         }
                     }
-                    compose::ComposedOutput::OpReturn { data_hex } => {
-                        PrecomposedOutput::OpReturn { data_hex: data_hex.clone() }
-                    }
-                }).collect();
+                    PrecomposeOutput::SendMax { address } => InternalComposeOutput::SendMax {
+                        address: address.clone(),
+                    },
+                    PrecomposeOutput::SendMaxNoAddress => InternalComposeOutput::SendMaxNoAddress,
+                    PrecomposeOutput::OpReturn { data_hex } => InternalComposeOutput::OpReturn {
+                        data_hex: data_hex.clone(),
+                    },
+                })
+                .collect();
 
-                PrecomposedResult::Final {
-                    total_spent: total_spent.to_string(),
-                    fee: fee.to_string(),
-                    fee_per_byte: fee_per_byte.to_string(),
+            let base_fee = level.base_fee.unwrap_or(0);
+
+            let request = ComposeRequest {
+                inputs,
+                outputs,
+                fee_rate,
+                base_fee,
+                change_script_type,
+                sorting_strategy: sorting,
+                sequence: params.sequence,
+            };
+
+            match compose::compose_tx(request) {
+                ComposeResult::Final {
+                    total_spent,
+                    fee,
+                    fee_per_byte,
                     bytes,
-                    inputs: precomposed_inputs,
-                    outputs: precomposed_outputs,
+                    inputs,
+                    outputs,
                     outputs_permutation,
+                } => {
+                    let precomposed_inputs: Vec<PrecomposedInput> = inputs
+                        .iter()
+                        .map(|i| PrecomposedInput {
+                            txid: i.txid.clone(),
+                            vout: i.vout,
+                            amount: i.amount.to_string(),
+                            address: i.address.clone(),
+                            path: i.path.clone(),
+                            script_type: i.script_type,
+                        })
+                        .collect();
+
+                    let precomposed_outputs: Vec<PrecomposedOutput> = outputs
+                        .iter()
+                        .map(|o| match o {
+                            compose::ComposedOutput::Payment { address, amount } => {
+                                PrecomposedOutput::Payment {
+                                    address: address.clone(),
+                                    amount: amount.to_string(),
+                                }
+                            }
+                            compose::ComposedOutput::Change {
+                                amount,
+                                script_type,
+                                ..
+                            } => {
+                                let (addr, path) = change_address
+                                    .map(|a| (a.address.clone(), a.path.clone()))
+                                    .unwrap_or_default();
+                                PrecomposedOutput::Change {
+                                    address: addr,
+                                    path,
+                                    amount: amount.to_string(),
+                                    script_type: *script_type,
+                                }
+                            }
+                            compose::ComposedOutput::OpReturn { data_hex } => {
+                                PrecomposedOutput::OpReturn {
+                                    data_hex: data_hex.clone(),
+                                }
+                            }
+                        })
+                        .collect();
+
+                    PrecomposedResult::Final {
+                        total_spent: total_spent.to_string(),
+                        fee: fee.to_string(),
+                        fee_per_byte: fee_per_byte.to_string(),
+                        bytes,
+                        inputs: precomposed_inputs,
+                        outputs: precomposed_outputs,
+                        outputs_permutation,
+                    }
                 }
-            }
-            ComposeResult::NonFinal { max, total_spent, fee, fee_per_byte, bytes } => {
-                PrecomposedResult::NonFinal {
+                ComposeResult::NonFinal {
+                    max,
+                    total_spent,
+                    fee,
+                    fee_per_byte,
+                    bytes,
+                } => PrecomposedResult::NonFinal {
                     max: max.map(|m| m.to_string()),
                     total_spent: total_spent.to_string(),
                     fee: fee.to_string(),
                     fee_per_byte: fee_per_byte.to_string(),
                     bytes,
-                }
+                },
+                ComposeResult::Error(e) => PrecomposedResult::Error {
+                    error: e.to_string(),
+                },
             }
-            ComposeResult::Error(e) => {
-                PrecomposedResult::Error { error: e.to_string() }
-            }
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -415,13 +464,11 @@ mod tests {
         ComposeAccount {
             path: "m/84'/1'/0'".to_string(),
             addresses: AccountAddresses {
-                used: vec![
-                    AccountAddress {
-                        address: "bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq".to_string(),
-                        path: "m/84'/1'/0'/0/0".to_string(),
-                        transfers: 2,
-                    },
-                ],
+                used: vec![AccountAddress {
+                    address: "bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq".to_string(),
+                    path: "m/84'/1'/0'/0/0".to_string(),
+                    transfers: 2,
+                }],
                 unused: vec![
                     AccountAddress {
                         address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
@@ -449,7 +496,8 @@ mod tests {
             },
             utxo: vec![
                 ComposeUtxo {
-                    txid: "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba".to_string(),
+                    txid: "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba"
+                        .to_string(),
                     vout: 1,
                     amount: 100_000,
                     address: "bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq".to_string(),
@@ -460,7 +508,8 @@ mod tests {
                     required: None,
                 },
                 ComposeUtxo {
-                    txid: "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6".to_string(),
+                    txid: "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6"
+                        .to_string(),
                     vout: 1,
                     amount: 100_000,
                     address: "bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq".to_string(),
@@ -479,17 +528,17 @@ mod tests {
         vec![
             // prev_tx for UTXO txid=559a6e22...
             SignTxPrevTx {
-                hash: "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba".to_string(),
+                hash: "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba"
+                    .to_string(),
                 version: 2,
                 lock_time: 71691,
-                inputs: vec![
-                    SignTxPrevTxInput {
-                        prev_hash: "0f83ebcb66fe07a1cf9e2331cb12647bef185fd41810a948f951764c9fd7da63".to_string(),
-                        prev_index: 0,
-                        script_sig: "".to_string(),
-                        sequence: 4294967294,
-                    },
-                ],
+                inputs: vec![SignTxPrevTxInput {
+                    prev_hash: "0f83ebcb66fe07a1cf9e2331cb12647bef185fd41810a948f951764c9fd7da63"
+                        .to_string(),
+                    prev_index: 0,
+                    script_sig: "".to_string(),
+                    sequence: 4294967294,
+                }],
                 outputs: vec![
                     SignTxPrevTxOutput {
                         amount: 507281,
@@ -504,17 +553,17 @@ mod tests {
             },
             // prev_tx for UTXO txid=0374da2d...
             SignTxPrevTx {
-                hash: "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6".to_string(),
+                hash: "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6"
+                    .to_string(),
                 version: 2,
                 lock_time: 71691,
-                inputs: vec![
-                    SignTxPrevTxInput {
-                        prev_hash: "92ca73996a1f249f41bf92db3ed225bdb81b1a5b757837691c3fc5afb3d1b991".to_string(),
-                        prev_index: 1,
-                        script_sig: "".to_string(),
-                        sequence: 4294967294,
-                    },
-                ],
+                inputs: vec![SignTxPrevTxInput {
+                    prev_hash: "92ca73996a1f249f41bf92db3ed225bdb81b1a5b757837691c3fc5afb3d1b991"
+                        .to_string(),
+                    prev_index: 1,
+                    script_sig: "".to_string(),
+                    sequence: 4294967294,
+                }],
                 outputs: vec![
                     SignTxPrevTxOutput {
                         amount: 5079580,
@@ -544,13 +593,11 @@ mod tests {
             ],
             coin: "Regtest".to_string(),
             account: test_account(),
-            fee_levels: vec![
-                FeeLevel {
-                    fee_per_unit: "2".to_string(),
-                    base_fee: None,
-                    floor_base_fee: None,
-                },
-            ],
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".to_string(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
         };
@@ -559,7 +606,13 @@ mod tests {
         assert_eq!(results.len(), 1, "Expected one result per fee level");
 
         match &results[0] {
-            PrecomposedResult::Final { total_spent, fee, inputs, outputs, .. } => {
+            PrecomposedResult::Final {
+                total_spent,
+                fee,
+                inputs,
+                outputs,
+                ..
+            } => {
                 let total: u64 = total_spent.parse().unwrap();
                 let fee_val: u64 = fee.parse().unwrap();
 
@@ -571,15 +624,22 @@ mod tests {
                 // Verify inputs are from our real UTXOs
                 for input in inputs {
                     assert!(
-                        input.txid == "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba"
-                        || input.txid == "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6",
+                        input.txid
+                            == "559a6e22b4064c6d1dd3e1ec72a0f65e89093924aba760f7d71d6c4f551e99ba"
+                            || input.txid
+                                == "0374da2d0896160ba8dd53c1d727431afec2e325663f891308e427c7c3b81cd6",
                         "Input should be from one of our known UTXOs"
                     );
                     assert_eq!(input.script_type, ScriptType::SpendWitness);
                 }
 
-                println!("Compose succeeded: total_spent={}, fee={}, inputs={}, outputs={}",
-                    total_spent, fee, inputs.len(), outputs.len());
+                println!(
+                    "Compose succeeded: total_spent={}, fee={}, inputs={}, outputs={}",
+                    total_spent,
+                    fee,
+                    inputs.len(),
+                    outputs.len()
+                );
             }
             PrecomposedResult::Error { error } => panic!("Compose failed: {}", error),
             PrecomposedResult::NonFinal { .. } => panic!("Expected Final result"),
@@ -591,21 +651,17 @@ mod tests {
     #[test]
     fn test_precompose_to_sign_params_conversion() {
         let params = PrecomposeParams {
-            outputs: vec![
-                PrecomposeOutput::Payment {
-                    address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
-                    amount: "50000".to_string(),
-                },
-            ],
+            outputs: vec![PrecomposeOutput::Payment {
+                address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
+                amount: "50000".to_string(),
+            }],
             coin: "Regtest".to_string(),
             account: test_account(),
-            fee_levels: vec![
-                FeeLevel {
-                    fee_per_unit: "2".to_string(),
-                    base_fee: None,
-                    floor_base_fee: None,
-                },
-            ],
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".to_string(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
         };
@@ -614,12 +670,14 @@ mod tests {
         let result = &results[0];
 
         match result {
-            PrecomposedResult::Final { inputs, outputs, .. } => {
+            PrecomposedResult::Final {
+                inputs, outputs, ..
+            } => {
                 // Convert to SignTxParams
-                let sign_inputs: Vec<crate::params::SignTxInput> = inputs.iter()
-                    .map(precomposed_input_to_sign_input)
-                    .collect();
-                let sign_outputs: Vec<crate::params::SignTxOutput> = outputs.iter()
+                let sign_inputs: Vec<crate::params::SignTxInput> =
+                    inputs.iter().map(precomposed_input_to_sign_input).collect();
+                let sign_outputs: Vec<crate::params::SignTxOutput> = outputs
+                    .iter()
                     .map(precomposed_output_to_sign_output)
                     .collect();
 
@@ -657,14 +715,23 @@ mod tests {
                 // If there's a change output, verify it has a path and script_type
                 for output in &sign_params.outputs {
                     if output.path.is_some() {
-                        assert!(output.script_type.is_some(), "Change output must have script_type");
-                        assert!(output.path.as_ref().unwrap().starts_with("m/84'/1'/0'/1/"),
-                            "Change output path should be on the change chain");
+                        assert!(
+                            output.script_type.is_some(),
+                            "Change output must have script_type"
+                        );
+                        assert!(
+                            output.path.as_ref().unwrap().starts_with("m/84'/1'/0'/1/"),
+                            "Change output path should be on the change chain"
+                        );
                     }
                 }
 
-                println!("SignTxParams constructed: {} inputs, {} outputs, {} prev_txs",
-                    sign_params.inputs.len(), sign_params.outputs.len(), sign_params.prev_txs.len());
+                println!(
+                    "SignTxParams constructed: {} inputs, {} outputs, {} prev_txs",
+                    sign_params.inputs.len(),
+                    sign_params.outputs.len(),
+                    sign_params.prev_txs.len()
+                );
             }
             other => panic!("Expected Final, got {:?}", other),
         }
@@ -674,27 +741,29 @@ mod tests {
     #[test]
     fn test_precompose_send_max_real_data() {
         let params = PrecomposeParams {
-            outputs: vec![
-                PrecomposeOutput::SendMax {
-                    address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
-                },
-            ],
+            outputs: vec![PrecomposeOutput::SendMax {
+                address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
+            }],
             coin: "Regtest".to_string(),
             account: test_account(),
-            fee_levels: vec![
-                FeeLevel {
-                    fee_per_unit: "2".to_string(),
-                    base_fee: None,
-                    floor_base_fee: None,
-                },
-            ],
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".to_string(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
         };
 
         let results = precompose(params);
         match &results[0] {
-            PrecomposedResult::Final { total_spent, fee, inputs, outputs, .. } => {
+            PrecomposedResult::Final {
+                total_spent,
+                fee,
+                inputs,
+                outputs,
+                ..
+            } => {
                 let total: u64 = total_spent.parse().unwrap();
                 let fee_val: u64 = fee.parse().unwrap();
 
@@ -712,7 +781,12 @@ mod tests {
                     other => panic!("Expected Payment output, got {:?}", other),
                 }
 
-                println!("Send-max: total={}, fee={}, output_amount={}", total, fee_val, total - fee_val);
+                println!(
+                    "Send-max: total={}, fee={}, output_amount={}",
+                    total,
+                    fee_val,
+                    total - fee_val
+                );
             }
             PrecomposedResult::Error { error } => panic!("Compose failed: {}", error),
             _ => panic!("Expected Final result for send-max"),
@@ -723,18 +797,28 @@ mod tests {
     #[test]
     fn test_precompose_multiple_fee_levels() {
         let params = PrecomposeParams {
-            outputs: vec![
-                PrecomposeOutput::Payment {
-                    address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
-                    amount: "50000".to_string(),
-                },
-            ],
+            outputs: vec![PrecomposeOutput::Payment {
+                address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
+                amount: "50000".to_string(),
+            }],
             coin: "Regtest".to_string(),
             account: test_account(),
             fee_levels: vec![
-                FeeLevel { fee_per_unit: "1".to_string(), base_fee: None, floor_base_fee: None },
-                FeeLevel { fee_per_unit: "5".to_string(), base_fee: None, floor_base_fee: None },
-                FeeLevel { fee_per_unit: "20".to_string(), base_fee: None, floor_base_fee: None },
+                FeeLevel {
+                    fee_per_unit: "1".to_string(),
+                    base_fee: None,
+                    floor_base_fee: None,
+                },
+                FeeLevel {
+                    fee_per_unit: "5".to_string(),
+                    base_fee: None,
+                    floor_base_fee: None,
+                },
+                FeeLevel {
+                    fee_per_unit: "20".to_string(),
+                    base_fee: None,
+                    floor_base_fee: None,
+                },
             ],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
@@ -748,7 +832,11 @@ mod tests {
             match result {
                 PrecomposedResult::Final { fee, .. } => {
                     let fee_val: u64 = fee.parse().unwrap();
-                    assert!(fee_val > prev_fee, "Fee level {} should be higher than previous", i);
+                    assert!(
+                        fee_val > prev_fee,
+                        "Fee level {} should be higher than previous",
+                        i
+                    );
                     prev_fee = fee_val;
                 }
                 PrecomposedResult::Error { error } => panic!("Fee level {} failed: {}", i, error),
@@ -768,8 +856,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_compose_and_sign_with_device() {
+        use crate::{PassphraseResponse, Trezor, TrezorUiCallback};
         use std::sync::Arc;
-        use crate::{Trezor, TrezorUiCallback, PassphraseResponse};
 
         struct TestUiCallback;
         impl TrezorUiCallback for TestUiCallback {
@@ -798,13 +886,11 @@ mod tests {
             ],
             coin: "Regtest".to_string(),
             account: test_account(),
-            fee_levels: vec![
-                FeeLevel {
-                    fee_per_unit: "2".to_string(),
-                    base_fee: None,
-                    floor_base_fee: None,
-                },
-            ],
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".to_string(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
         };
@@ -813,9 +899,20 @@ mod tests {
         let result = &results[0];
 
         let (inputs, outputs) = match result {
-            PrecomposedResult::Final { inputs, outputs, fee, total_spent, .. } => {
-                println!("Composed: total_spent={}, fee={}, inputs={}, outputs={}",
-                    total_spent, fee, inputs.len(), outputs.len());
+            PrecomposedResult::Final {
+                inputs,
+                outputs,
+                fee,
+                total_spent,
+                ..
+            } => {
+                println!(
+                    "Composed: total_spent={}, fee={}, inputs={}, outputs={}",
+                    total_spent,
+                    fee,
+                    inputs.len(),
+                    outputs.len()
+                );
                 (inputs, outputs)
             }
             PrecomposedResult::Error { error } => panic!("Compose failed: {}", error),
@@ -823,10 +920,10 @@ mod tests {
         };
 
         // 2. Convert compose result to SignTxParams
-        let sign_inputs: Vec<crate::params::SignTxInput> = inputs.iter()
-            .map(precomposed_input_to_sign_input)
-            .collect();
-        let sign_outputs: Vec<crate::params::SignTxOutput> = outputs.iter()
+        let sign_inputs: Vec<crate::params::SignTxInput> =
+            inputs.iter().map(precomposed_input_to_sign_input).collect();
+        let sign_outputs: Vec<crate::params::SignTxOutput> = outputs
+            .iter()
             .map(precomposed_output_to_sign_output)
             .collect();
 
@@ -845,8 +942,12 @@ mod tests {
             payment_requests: vec![],
         };
 
-        println!("SignTxParams: {} inputs, {} outputs, {} prev_txs",
-            sign_params.inputs.len(), sign_params.outputs.len(), sign_params.prev_txs.len());
+        println!(
+            "SignTxParams: {} inputs, {} outputs, {} prev_txs",
+            sign_params.inputs.len(),
+            sign_params.outputs.len(),
+            sign_params.prev_txs.len()
+        );
 
         // 3. Connect to device and sign
         let mut trezor = Trezor::new()
@@ -857,25 +958,46 @@ mod tests {
 
         println!("Scanning for devices...");
         let devices = trezor.scan().await.expect("Failed to scan for devices");
-        assert!(!devices.is_empty(), "No Trezor devices found! Connect a device loaded with the test mnemonic.");
+        assert!(
+            !devices.is_empty(),
+            "No Trezor devices found! Connect a device loaded with the test mnemonic."
+        );
 
         println!("Connecting to {}...", devices[0].display_name());
-        let mut device = trezor.connect(&devices[0]).await.expect("Failed to connect");
+        let mut device = trezor
+            .connect(&devices[0])
+            .await
+            .expect("Failed to connect");
 
-        let features = device.initialize().await.expect("Failed to initialize device");
-        println!("Connected: {}", features.label.as_deref().unwrap_or("Unnamed"));
+        let features = device
+            .initialize()
+            .await
+            .expect("Failed to initialize device");
+        println!(
+            "Connected: {}",
+            features.label.as_deref().unwrap_or("Unnamed")
+        );
 
         // 4. Sign the transaction
         println!("Signing transaction... Please confirm on device.");
-        let signed = device.sign_transaction(sign_params).await.expect("Failed to sign transaction");
+        let signed = device
+            .sign_transaction(sign_params)
+            .await
+            .expect("Failed to sign transaction");
 
         println!("\nTransaction signed successfully!");
         println!("Signatures: {:?}", signed.signatures);
         println!("Serialized TX ({} bytes):", signed.serialized_tx.len() / 2);
         println!("{}", signed.serialized_tx);
 
-        assert!(!signed.signatures.is_empty(), "Should have at least one signature");
-        assert!(!signed.serialized_tx.is_empty(), "Should have serialized transaction");
+        assert!(
+            !signed.signatures.is_empty(),
+            "Should have at least one signature"
+        );
+        assert!(
+            !signed.serialized_tx.is_empty(),
+            "Should have serialized transaction"
+        );
 
         // Verify each signature is non-empty
         for (i, sig) in signed.signatures.iter().enumerate() {
@@ -889,28 +1011,26 @@ mod tests {
     #[test]
     fn test_precomposed_final_to_sign_params() {
         let params = PrecomposeParams {
-            outputs: vec![
-                PrecomposeOutput::Payment {
-                    address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
-                    amount: "50000".to_string(),
-                },
-            ],
+            outputs: vec![PrecomposeOutput::Payment {
+                address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
+                amount: "50000".to_string(),
+            }],
             coin: "Regtest".to_string(),
             account: test_account(),
-            fee_levels: vec![
-                FeeLevel {
-                    fee_per_unit: "2".to_string(),
-                    base_fee: None,
-                    floor_base_fee: None,
-                },
-            ],
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".to_string(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
             sequence: None,
             sorting_strategy: Some(SortingStrategy::None),
         };
 
         let results = precompose(params);
         match &results[0] {
-            PrecomposedResult::Final { inputs, outputs, .. } => {
+            PrecomposedResult::Final {
+                inputs, outputs, ..
+            } => {
                 let sign_params = precomposed_final_to_sign_params(
                     inputs,
                     outputs,
@@ -919,8 +1039,14 @@ mod tests {
 
                 assert_eq!(sign_params.inputs.len(), inputs.len());
                 assert_eq!(sign_params.outputs.len(), outputs.len());
-                assert!(sign_params.prev_txs.is_empty(), "prev_txs should be empty by default");
-                assert_eq!(sign_params.coin, Some(crate::types::network::Network::Regtest));
+                assert!(
+                    sign_params.prev_txs.is_empty(),
+                    "prev_txs should be empty by default"
+                );
+                assert_eq!(
+                    sign_params.coin,
+                    Some(crate::types::network::Network::Regtest)
+                );
 
                 for (sign_input, compose_input) in sign_params.inputs.iter().zip(inputs.iter()) {
                     assert_eq!(sign_input.prev_hash, compose_input.txid);

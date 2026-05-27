@@ -85,15 +85,20 @@ pub fn coinselect(
 
     if has_send_max {
         return split::split(
-            inputs, outputs, fee_rate, base_fee, change_script_type,
-            confirmations, coinbase_flags,
+            inputs,
+            outputs,
+            fee_rate,
+            base_fee,
+            change_script_type,
+            confirmations,
+            coinbase_flags,
         );
     }
 
     // Try BnB first for exact-match (no change output)
-    if let Some(result) = bnb::branch_and_bound(
-        inputs, outputs, fee_rate, base_fee, change_script_type,
-    ) {
+    if let Some(result) =
+        bnb::branch_and_bound(inputs, outputs, fee_rate, base_fee, change_script_type)
+    {
         return result;
     }
 

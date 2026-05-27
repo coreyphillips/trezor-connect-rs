@@ -11,11 +11,11 @@ use crate::device::Features;
 use crate::device_info::DeviceInfo;
 use crate::error::{DeviceError, Result};
 use crate::params::*;
-use crate::protos::{self, MessageType};
 use crate::protos::bitcoin::{tx_ack, tx_request};
+use crate::protos::{self, MessageType};
 use crate::responses::*;
 use crate::transport::Transport;
-use crate::types::bitcoin::{ScriptType, OutputScriptType};
+use crate::types::bitcoin::{OutputScriptType, ScriptType};
 use crate::types::path::{parse_path, serialize_path};
 use crate::ui_callback::TrezorUiCallback;
 
@@ -45,11 +45,7 @@ impl ConnectedDevice {
     /// * `info` - Device information
     /// * `transport` - Transport for communication (boxed for transport abstraction)
     /// * `session` - Active session ID
-    pub fn new(
-        info: DeviceInfo,
-        transport: Box<dyn Transport>,
-        session: String,
-    ) -> Self {
+    pub fn new(info: DeviceInfo, transport: Box<dyn Transport>, session: String) -> Self {
         Self {
             info,
             transport,
@@ -100,20 +96,24 @@ impl ConnectedDevice {
             // via ThpCreateNewSession during acquire()
             log::debug!("[Device] Using GetFeatures for THP device");
             let get_features = protos::management::GetFeatures::default();
-            self.transport.call(
-                &self.session,
-                MessageType::GetFeatures as u16,
-                &get_features.encode_to_vec(),
-            ).await?
+            self.transport
+                .call(
+                    &self.session,
+                    MessageType::GetFeatures as u16,
+                    &get_features.encode_to_vec(),
+                )
+                .await?
         } else {
             // For V1 devices, use Initialize
             log::debug!("[Device] Using Initialize for V1 device");
             let init = protos::management::Initialize::default();
-            self.transport.call(
-                &self.session,
-                MessageType::Initialize as u16,
-                &init.encode_to_vec(),
-            ).await?
+            self.transport
+                .call(
+                    &self.session,
+                    MessageType::Initialize as u16,
+                    &init.encode_to_vec(),
+                )
+                .await?
         };
 
         let proto_features: protos::management::Features =
@@ -143,7 +143,8 @@ impl ConnectedDevice {
     /// ```
     pub async fn get_address(&self, params: GetAddressParams) -> Result<AddressResponse> {
         let address_n = parse_path(&params.path)?;
-        let script_type = params.script_type
+        let script_type = params
+            .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
         let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
@@ -157,14 +158,16 @@ impl ConnectedDevice {
             chunkify: None,
         };
 
-        let (resp_type, resp_data) = self.transport.call(
-            &self.session,
-            MessageType::GetAddress as u16,
-            &request.encode_to_vec(),
-        ).await?;
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::GetAddress as u16,
+                &request.encode_to_vec(),
+            )
+            .await?;
 
-        let response: protos::bitcoin::Address =
-            self.handle_response(resp_type, resp_data).await?;
+        let response: protos::bitcoin::Address = self.handle_response(resp_type, resp_data).await?;
 
         Ok(AddressResponse {
             path: address_n.clone(),
@@ -243,7 +246,8 @@ impl ConnectedDevice {
     /// ```
     pub async fn get_public_key(&self, params: GetPublicKeyParams) -> Result<PublicKeyResponse> {
         let address_n = parse_path(&params.path)?;
-        let script_type = params.script_type
+        let script_type = params
+            .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
         let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
@@ -256,11 +260,14 @@ impl ConnectedDevice {
             ignore_xpub_magic: None,
         };
 
-        let (resp_type, resp_data) = self.transport.call(
-            &self.session,
-            MessageType::GetPublicKey as u16,
-            &request.encode_to_vec(),
-        ).await?;
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::GetPublicKey as u16,
+                &request.encode_to_vec(),
+            )
+            .await?;
 
         let response: protos::bitcoin::PublicKey =
             self.handle_response(resp_type, resp_data).await?;
@@ -299,21 +306,29 @@ impl ConnectedDevice {
             message: params.message.as_bytes().to_vec(),
             coin_name: Some(coin_name),
             script_type: Some(script_type as i32),
-            no_script_type: if params.no_script_type { Some(true) } else { None },
+            no_script_type: if params.no_script_type {
+                Some(true)
+            } else {
+                None
+            },
             chunkify: None,
         };
 
-        let (resp_type, resp_data) = self.transport.call(
-            &self.session,
-            MessageType::SignMessage as u16,
-            &request.encode_to_vec(),
-        ).await?;
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::SignMessage as u16,
+                &request.encode_to_vec(),
+            )
+            .await?;
 
         let response: protos::bitcoin::MessageSignature =
             self.handle_response(resp_type, resp_data).await?;
 
         use base64::Engine;
-        let signature_base64 = base64::engine::general_purpose::STANDARD.encode(&response.signature);
+        let signature_base64 =
+            base64::engine::general_purpose::STANDARD.encode(&response.signature);
 
         Ok(SignedMessageResponse {
             address: response.address,
@@ -349,19 +364,21 @@ impl ConnectedDevice {
             chunkify: None,
         };
 
-        let (resp_type, resp_data) = self.transport.call(
-            &self.session,
-            MessageType::VerifyMessage as u16,
-            &request.encode_to_vec(),
-        ).await?;
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::VerifyMessage as u16,
+                &request.encode_to_vec(),
+            )
+            .await?;
 
         // On success, device returns Success message
         match MessageType::try_from(resp_type as i32) {
             Ok(MessageType::Success) => Ok(true),
             Ok(MessageType::Failure) => Ok(false),
             _ => {
-                let _: protos::common::Success =
-                    self.handle_response(resp_type, resp_data).await?;
+                let _: protos::common::Success = self.handle_response(resp_type, resp_data).await?;
                 Ok(true)
             }
         }
@@ -420,7 +437,8 @@ impl ConnectedDevice {
                 return Err(DeviceError::InvalidInput(format!(
                     "Output {}: OP_RETURN output must have amount 0, got {}",
                     i, output.amount
-                )).into());
+                ))
+                .into());
             }
         }
 
@@ -445,7 +463,9 @@ impl ConnectedDevice {
             .map(|output| {
                 if let Some(ref path_str) = output.path {
                     let path = parse_path(path_str)?;
-                    let script_type = output.script_type.unwrap_or_else(|| infer_script_type(&path));
+                    let script_type = output
+                        .script_type
+                        .unwrap_or_else(|| infer_script_type(&path));
                     Ok(Some((path, script_type)))
                 } else {
                     Ok(None)
@@ -457,15 +477,24 @@ impl ConnectedDevice {
         if let Some(ref unlock) = params.unlock_path {
             let unlock_msg = protos::management::UnlockPath {
                 address_n: unlock.address_n.clone(),
-                mac: unlock.mac.as_ref().map(|m| hex::decode(m)).transpose()
-                    .map_err(|e| DeviceError::InvalidInput(format!("Invalid unlock_path mac hex: {}", e)))?,
+                mac: unlock
+                    .mac
+                    .as_ref()
+                    .map(|m| hex::decode(m))
+                    .transpose()
+                    .map_err(|e| {
+                        DeviceError::InvalidInput(format!("Invalid unlock_path mac hex: {}", e))
+                    })?,
             };
 
-            let (resp_type, resp_data) = self.transport.call(
-                &self.session,
-                MessageType::UnlockPath as u16,
-                &unlock_msg.encode_to_vec(),
-            ).await?;
+            let (resp_type, resp_data) = self
+                .transport
+                .call(
+                    &self.session,
+                    MessageType::UnlockPath as u16,
+                    &unlock_msg.encode_to_vec(),
+                )
+                .await?;
 
             // Expect UnlockedPathRequest response (message type 94)
             let _: protos::management::UnlockedPathRequest =
@@ -491,11 +520,14 @@ impl ConnectedDevice {
             chunkify: params.chunkify,
         };
 
-        let (mut resp_type, mut resp_data) = self.transport.call(
-            &self.session,
-            MessageType::SignTx as u16,
-            &sign_tx.encode_to_vec(),
-        ).await?;
+        let (mut resp_type, mut resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::SignTx as u16,
+                &sign_tx.encode_to_vec(),
+            )
+            .await?;
 
         let mut signatures: Vec<String> = vec![String::new(); params.inputs.len()];
         let mut serialized_tx = Vec::new();
@@ -505,11 +537,14 @@ impl ConnectedDevice {
             // Handle button requests
             if let Ok(MessageType::ButtonRequest) = MessageType::try_from(resp_type as i32) {
                 let ack = protos::common::ButtonAck {};
-                let result = self.transport.call(
-                    &self.session,
-                    MessageType::ButtonAck as u16,
-                    &ack.encode_to_vec(),
-                ).await?;
+                let result = self
+                    .transport
+                    .call(
+                        &self.session,
+                        MessageType::ButtonAck as u16,
+                        &ack.encode_to_vec(),
+                    )
+                    .await?;
                 resp_type = result.0;
                 resp_data = result.1;
                 continue;
@@ -522,7 +557,8 @@ impl ConnectedDevice {
                 return Err(DeviceError::DeviceError {
                     code: failure.code.unwrap_or(0),
                     message: failure.message.unwrap_or_default(),
-                }.into());
+                }
+                .into());
             }
 
             // Parse TxRequest
@@ -537,9 +573,12 @@ impl ConnectedDevice {
                         if idx < signatures.len() {
                             signatures[idx] = hex::encode(sig);
                         } else {
-                            return Err(DeviceError::InvalidInput(
-                                format!("signature_index {} out of bounds (max {})", idx, signatures.len() - 1)
-                            ).into());
+                            return Err(DeviceError::InvalidInput(format!(
+                                "signature_index {} out of bounds (max {})",
+                                idx,
+                                signatures.len() - 1
+                            ))
+                            .into());
                         }
                     }
                 }
@@ -549,7 +588,8 @@ impl ConnectedDevice {
             }
 
             // Check request type
-            let request_type = tx_request.request_type
+            let request_type = tx_request
+                .request_type
                 .and_then(|t| tx_request::RequestType::try_from(t).ok())
                 .unwrap_or(tx_request::RequestType::Txfinished);
 
@@ -559,150 +599,209 @@ impl ConnectedDevice {
                     break;
                 }
                 tx_request::RequestType::Txinput => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details".to_string())
+                    })?;
                     let idx = details.request_index.unwrap_or(0) as usize;
 
                     let tx_ack = if let Some(ref tx_hash) = details.tx_hash {
                         // Previous transaction input
                         let prev_tx = find_prev_tx(&params.prev_txs, tx_hash)?;
                         if idx >= prev_tx.inputs.len() {
-                            return Err(DeviceError::InvalidInput(
-                                format!("prev tx input index {} out of bounds (len {})", idx, prev_tx.inputs.len())
-                            ).into());
+                            return Err(DeviceError::InvalidInput(format!(
+                                "prev tx input index {} out of bounds (len {})",
+                                idx,
+                                prev_tx.inputs.len()
+                            ))
+                            .into());
                         }
                         self.build_prev_tx_input_ack(&prev_tx.inputs[idx])?
                     } else {
                         // Current transaction input
                         if idx >= params.inputs.len() {
-                            return Err(DeviceError::InvalidInput(
-                                format!("request_index {} out of bounds for inputs (len {})", idx, params.inputs.len())
-                            ).into());
+                            return Err(DeviceError::InvalidInput(format!(
+                                "request_index {} out of bounds for inputs (len {})",
+                                idx,
+                                params.inputs.len()
+                            ))
+                            .into());
                         }
                         self.build_input_ack(&params.inputs[idx], &parsed_inputs[idx])?
                     };
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txoutput => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details".to_string())
+                    })?;
                     let idx = details.request_index.unwrap_or(0) as usize;
 
                     let tx_ack = if let Some(ref tx_hash) = details.tx_hash {
                         // Previous transaction output (uses bin_outputs, not outputs)
                         let prev_tx = find_prev_tx(&params.prev_txs, tx_hash)?;
                         if idx >= prev_tx.outputs.len() {
-                            return Err(DeviceError::InvalidInput(
-                                format!("prev tx output index {} out of bounds (len {})", idx, prev_tx.outputs.len())
-                            ).into());
+                            return Err(DeviceError::InvalidInput(format!(
+                                "prev tx output index {} out of bounds (len {})",
+                                idx,
+                                prev_tx.outputs.len()
+                            ))
+                            .into());
                         }
                         self.build_prev_tx_output_ack(&prev_tx.outputs[idx])?
                     } else {
                         // Current transaction output
                         if idx >= params.outputs.len() {
-                            return Err(DeviceError::InvalidInput(
-                                format!("request_index {} out of bounds for outputs (len {})", idx, params.outputs.len())
-                            ).into());
+                            return Err(DeviceError::InvalidInput(format!(
+                                "request_index {} out of bounds for outputs (len {})",
+                                idx,
+                                params.outputs.len()
+                            ))
+                            .into());
                         }
                         self.build_output_ack(&params.outputs[idx], &parsed_outputs[idx])?
                     };
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txmeta => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details".to_string()))?;
-                    let tx_hash = details.tx_hash.as_ref()
-                        .ok_or_else(|| DeviceError::InvalidInput("TXMETA missing tx_hash".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details".to_string())
+                    })?;
+                    let tx_hash = details.tx_hash.as_ref().ok_or_else(|| {
+                        DeviceError::InvalidInput("TXMETA missing tx_hash".to_string())
+                    })?;
                     let prev_tx = find_prev_tx(&params.prev_txs, tx_hash)?;
                     let tx_ack = self.build_prev_tx_meta_ack(prev_tx)?;
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txoriginput => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details".to_string())
+                    })?;
                     let idx = details.request_index.unwrap_or(0);
-                    let tx_hash = details.tx_hash.as_ref()
-                        .ok_or_else(|| DeviceError::InvalidInput("TXORIGINPUT missing tx_hash".to_string()))?;
+                    let tx_hash = details.tx_hash.as_ref().ok_or_else(|| {
+                        DeviceError::InvalidInput("TXORIGINPUT missing tx_hash".to_string())
+                    })?;
                     let tx_hash_hex = hex::encode(tx_hash);
 
                     // Find the current input that references this original transaction
-                    let (input_idx, _) = params.inputs.iter().enumerate()
+                    let (input_idx, _) = params
+                        .inputs
+                        .iter()
+                        .enumerate()
                         .find(|(_, input)| {
-                            input.orig_hash.as_deref() == Some(&tx_hash_hex) && input.orig_index == Some(idx)
+                            input.orig_hash.as_deref() == Some(&tx_hash_hex)
+                                && input.orig_index == Some(idx)
                         })
-                        .ok_or_else(|| DeviceError::InvalidInput(
-                            format!("No current input references orig tx {} at index {}", tx_hash_hex, idx)
-                        ))?;
+                        .ok_or_else(|| {
+                            DeviceError::InvalidInput(format!(
+                                "No current input references orig tx {} at index {}",
+                                tx_hash_hex, idx
+                            ))
+                        })?;
 
-                    let tx_ack = self.build_input_ack(&params.inputs[input_idx], &parsed_inputs[input_idx])?;
+                    let tx_ack =
+                        self.build_input_ack(&params.inputs[input_idx], &parsed_inputs[input_idx])?;
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txorigoutput => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details".to_string())
+                    })?;
                     let idx = details.request_index.unwrap_or(0);
-                    let tx_hash = details.tx_hash.as_ref()
-                        .ok_or_else(|| DeviceError::InvalidInput("TXORIGOUTPUT missing tx_hash".to_string()))?;
+                    let tx_hash = details.tx_hash.as_ref().ok_or_else(|| {
+                        DeviceError::InvalidInput("TXORIGOUTPUT missing tx_hash".to_string())
+                    })?;
                     let tx_hash_hex = hex::encode(tx_hash);
 
                     // Find the current output that references this original transaction
-                    let (output_idx, _) = params.outputs.iter().enumerate()
+                    let (output_idx, _) = params
+                        .outputs
+                        .iter()
+                        .enumerate()
                         .find(|(_, output)| {
-                            output.orig_hash.as_deref() == Some(&tx_hash_hex) && output.orig_index == Some(idx)
+                            output.orig_hash.as_deref() == Some(&tx_hash_hex)
+                                && output.orig_index == Some(idx)
                         })
-                        .ok_or_else(|| DeviceError::InvalidInput(
-                            format!("No current output references orig tx {} at index {}", tx_hash_hex, idx)
-                        ))?;
+                        .ok_or_else(|| {
+                            DeviceError::InvalidInput(format!(
+                                "No current output references orig tx {} at index {}",
+                                tx_hash_hex, idx
+                            ))
+                        })?;
 
-                    let tx_ack = self.build_output_ack(&params.outputs[output_idx], &parsed_outputs[output_idx])?;
+                    let tx_ack = self.build_output_ack(
+                        &params.outputs[output_idx],
+                        &parsed_outputs[output_idx],
+                    )?;
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txextradata => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details for TXEXTRADATA".to_string()))?;
-                    let tx_hash = details.tx_hash.as_ref()
-                        .ok_or_else(|| DeviceError::InvalidInput("TXEXTRADATA missing tx_hash".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details for TXEXTRADATA".to_string())
+                    })?;
+                    let tx_hash = details.tx_hash.as_ref().ok_or_else(|| {
+                        DeviceError::InvalidInput("TXEXTRADATA missing tx_hash".to_string())
+                    })?;
                     let prev_tx = find_prev_tx(&params.prev_txs, tx_hash)?;
 
-                    let extra_data_bytes = prev_tx.extra_data.as_ref()
+                    let extra_data_bytes = prev_tx
+                        .extra_data
+                        .as_ref()
                         .map(|d| hex::decode(d))
                         .transpose()
-                        .map_err(|e| DeviceError::InvalidInput(format!("Invalid extra_data hex: {}", e)))?
+                        .map_err(|e| {
+                            DeviceError::InvalidInput(format!("Invalid extra_data hex: {}", e))
+                        })?
                         .unwrap_or_default();
 
                     let offset = details.extra_data_offset.unwrap_or(0) as usize;
@@ -733,33 +832,43 @@ impl ConnectedDevice {
                         }),
                     };
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::TxAck as u16,
-                        &tx_ack.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::TxAck as u16,
+                            &tx_ack.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
                 tx_request::RequestType::Txpaymentreq => {
-                    let details = tx_request.details.as_ref()
-                        .ok_or_else(|| DeviceError::ProtobufDecode("Missing details for TXPAYMENTREQ".to_string()))?;
+                    let details = tx_request.details.as_ref().ok_or_else(|| {
+                        DeviceError::ProtobufDecode("Missing details for TXPAYMENTREQ".to_string())
+                    })?;
                     let idx = details.request_index.unwrap_or(0) as usize;
 
                     if idx >= params.payment_requests.len() {
-                        return Err(DeviceError::InvalidInput(
-                            format!("payment_req_index {} out of bounds (len {})", idx, params.payment_requests.len())
-                        ).into());
+                        return Err(DeviceError::InvalidInput(format!(
+                            "payment_req_index {} out of bounds (len {})",
+                            idx,
+                            params.payment_requests.len()
+                        ))
+                        .into());
                     }
 
                     let pr = &params.payment_requests[idx];
                     let payment_req = convert_payment_request(pr)?;
 
-                    let result = self.transport.call(
-                        &self.session,
-                        MessageType::PaymentRequest as u16,
-                        &payment_req.encode_to_vec(),
-                    ).await?;
+                    let result = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::PaymentRequest as u16,
+                            &payment_req.encode_to_vec(),
+                        )
+                        .await?;
                     resp_type = result.0;
                     resp_data = result.1;
                 }
@@ -786,32 +895,58 @@ impl ConnectedDevice {
 
         // For EXTERNAL inputs, decode optional hex fields
         let script_sig = if input.script_type == ScriptType::External {
-            input.script_sig.as_ref().map(|s| hex::decode(s)).transpose()
+            input
+                .script_sig
+                .as_ref()
+                .map(|s| hex::decode(s))
+                .transpose()
                 .map_err(|e| DeviceError::InvalidInput(format!("Invalid script_sig hex: {}", e)))?
         } else {
             None
         };
         let witness = if input.script_type == ScriptType::External {
-            input.witness.as_ref().map(|w| hex::decode(w)).transpose()
+            input
+                .witness
+                .as_ref()
+                .map(|w| hex::decode(w))
+                .transpose()
                 .map_err(|e| DeviceError::InvalidInput(format!("Invalid witness hex: {}", e)))?
         } else {
             None
         };
         let ownership_proof = if input.script_type == ScriptType::External {
-            input.ownership_proof.as_ref().map(|p| hex::decode(p)).transpose()
-                .map_err(|e| DeviceError::InvalidInput(format!("Invalid ownership_proof hex: {}", e)))?
+            input
+                .ownership_proof
+                .as_ref()
+                .map(|p| hex::decode(p))
+                .transpose()
+                .map_err(|e| {
+                    DeviceError::InvalidInput(format!("Invalid ownership_proof hex: {}", e))
+                })?
         } else {
             None
         };
         let commitment_data = if input.script_type == ScriptType::External {
-            input.commitment_data.as_ref().map(|c| hex::decode(c)).transpose()
-                .map_err(|e| DeviceError::InvalidInput(format!("Invalid commitment_data hex: {}", e)))?
+            input
+                .commitment_data
+                .as_ref()
+                .map(|c| hex::decode(c))
+                .transpose()
+                .map_err(|e| {
+                    DeviceError::InvalidInput(format!("Invalid commitment_data hex: {}", e))
+                })?
         } else {
             None
         };
         let script_pubkey = if input.script_type == ScriptType::External {
-            input.script_pubkey.as_ref().map(|s| hex::decode(s)).transpose()
-                .map_err(|e| DeviceError::InvalidInput(format!("Invalid script_pubkey hex: {}", e)))?
+            input
+                .script_pubkey
+                .as_ref()
+                .map(|s| hex::decode(s))
+                .transpose()
+                .map_err(|e| {
+                    DeviceError::InvalidInput(format!("Invalid script_pubkey hex: {}", e))
+                })?
         } else {
             None
         };
@@ -829,7 +964,11 @@ impl ConnectedDevice {
             witness,
             ownership_proof,
             commitment_data,
-            orig_hash: input.orig_hash.as_ref().map(|h| hex::decode(h)).transpose()
+            orig_hash: input
+                .orig_hash
+                .as_ref()
+                .map(|h| hex::decode(h))
+                .transpose()
                 .map_err(|e| DeviceError::InvalidInput(format!("Invalid orig_hash hex: {}", e)))?,
             orig_index: input.orig_index,
             decred_staking_spend: None,
@@ -863,15 +1002,20 @@ impl ConnectedDevice {
         output: &SignTxOutput,
         parsed: &Option<(Vec<u32>, ScriptType)>,
     ) -> Result<protos::bitcoin::TxAck> {
-        let orig_hash = output.orig_hash.as_ref().map(|h| hex::decode(h)).transpose()
+        let orig_hash = output
+            .orig_hash
+            .as_ref()
+            .map(|h| hex::decode(h))
+            .transpose()
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid orig_hash hex: {}", e)))?;
         let orig_index = output.orig_index;
         let payment_req_index = output.payment_req_index;
 
         let tx_output = if let Some(ref op_return_data) = output.op_return_data {
             // OP_RETURN output
-            let data = hex::decode(op_return_data)
-                .map_err(|e| DeviceError::InvalidInput(format!("Invalid op_return_data hex: {}", e)))?;
+            let data = hex::decode(op_return_data).map_err(|e| {
+                DeviceError::InvalidInput(format!("Invalid op_return_data hex: {}", e))
+            })?;
             tx_ack::transaction_type::TxOutputType {
                 address: None,
                 address_n: vec![],
@@ -923,8 +1067,9 @@ impl ConnectedDevice {
             }
         } else {
             return Err(DeviceError::InvalidInput(
-                "Output must have either address, path, or op_return_data".to_string()
-            ).into());
+                "Output must have either address, path, or op_return_data".to_string(),
+            )
+            .into());
         };
 
         Ok(protos::bitcoin::TxAck {
@@ -949,7 +1094,9 @@ impl ConnectedDevice {
 
     /// Build TxAck for previous transaction metadata
     fn build_prev_tx_meta_ack(&self, prev_tx: &SignTxPrevTx) -> Result<protos::bitcoin::TxAck> {
-        let extra_data_len = prev_tx.extra_data.as_ref()
+        let extra_data_len = prev_tx
+            .extra_data
+            .as_ref()
             .map(|d| hex::decode(d).map(|b| b.len() as u32))
             .transpose()
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid extra_data hex: {}", e)))?
@@ -977,10 +1124,12 @@ impl ConnectedDevice {
 
     /// Build TxAck for a previous transaction input
     fn build_prev_tx_input_ack(&self, input: &SignTxPrevTxInput) -> Result<protos::bitcoin::TxAck> {
-        let prev_hash = hex::decode(&input.prev_hash)
-            .map_err(|e| DeviceError::InvalidInput(format!("Invalid prev tx input prev_hash hex: {}", e)))?;
-        let script_sig = hex::decode(&input.script_sig)
-            .map_err(|e| DeviceError::InvalidInput(format!("Invalid prev tx input script_sig hex: {}", e)))?;
+        let prev_hash = hex::decode(&input.prev_hash).map_err(|e| {
+            DeviceError::InvalidInput(format!("Invalid prev tx input prev_hash hex: {}", e))
+        })?;
+        let script_sig = hex::decode(&input.script_sig).map_err(|e| {
+            DeviceError::InvalidInput(format!("Invalid prev tx input script_sig hex: {}", e))
+        })?;
 
         let tx_input = tx_ack::transaction_type::TxInputType {
             address_n: vec![],
@@ -1023,9 +1172,13 @@ impl ConnectedDevice {
     }
 
     /// Build TxAck for a previous transaction output (uses bin_outputs)
-    fn build_prev_tx_output_ack(&self, output: &SignTxPrevTxOutput) -> Result<protos::bitcoin::TxAck> {
-        let script_pubkey = hex::decode(&output.script_pubkey)
-            .map_err(|e| DeviceError::InvalidInput(format!("Invalid prev tx output script_pubkey hex: {}", e)))?;
+    fn build_prev_tx_output_ack(
+        &self,
+        output: &SignTxPrevTxOutput,
+    ) -> Result<protos::bitcoin::TxAck> {
+        let script_pubkey = hex::decode(&output.script_pubkey).map_err(|e| {
+            DeviceError::InvalidInput(format!("Invalid prev tx output script_pubkey hex: {}", e))
+        })?;
 
         let bin_output = tx_ack::transaction_type::TxOutputBinType {
             amount: output.amount,
@@ -1081,16 +1234,20 @@ impl ConnectedDevice {
                     return Err(DeviceError::DeviceError {
                         code: failure.code.unwrap_or(0),
                         message: failure.message.unwrap_or_default(),
-                    }.into());
+                    }
+                    .into());
                 }
                 Ok(MessageType::ButtonRequest) => {
                     // Send ButtonAck and loop for the next response
                     let ack = protos::common::ButtonAck {};
-                    let (next_type, next_data) = self.transport.call(
-                        &self.session,
-                        MessageType::ButtonAck as u16,
-                        &ack.encode_to_vec(),
-                    ).await?;
+                    let (next_type, next_data) = self
+                        .transport
+                        .call(
+                            &self.session,
+                            MessageType::ButtonAck as u16,
+                            &ack.encode_to_vec(),
+                        )
+                        .await?;
                     current_type = next_type;
                     current_data = next_data;
                     continue;
@@ -1100,11 +1257,14 @@ impl ConnectedDevice {
                         match cb.on_pin_request() {
                             Some(pin) => {
                                 let ack = protos::PinMatrixAck { pin };
-                                let (next_type, next_data) = self.transport.call(
-                                    &self.session,
-                                    MessageType::PinMatrixAck as u16,
-                                    &ack.encode_to_vec(),
-                                ).await?;
+                                let (next_type, next_data) = self
+                                    .transport
+                                    .call(
+                                        &self.session,
+                                        MessageType::PinMatrixAck as u16,
+                                        &ack.encode_to_vec(),
+                                    )
+                                    .await?;
                                 current_type = next_type;
                                 current_data = next_data;
                                 continue;
@@ -1151,11 +1311,14 @@ impl ConnectedDevice {
                                 }
                             }
                         };
-                        let (next_type, next_data) = self.transport.call(
-                            &self.session,
-                            MessageType::PassphraseAck as u16,
-                            &ack.encode_to_vec(),
-                        ).await?;
+                        let (next_type, next_data) = self
+                            .transport
+                            .call(
+                                &self.session,
+                                MessageType::PassphraseAck as u16,
+                                &ack.encode_to_vec(),
+                            )
+                            .await?;
                         current_type = next_type;
                         current_data = next_data;
                         continue;
@@ -1172,7 +1335,8 @@ impl ConnectedDevice {
         Err(DeviceError::DeviceError {
             code: 0,
             message: "Too many consecutive ButtonRequests from device".to_string(),
-        }.into())
+        }
+        .into())
     }
 }
 
@@ -1187,54 +1351,71 @@ impl std::fmt::Debug for ConnectedDevice {
 }
 
 /// Find a previous transaction by its hash (hex-encoded bytes from the device).
-fn find_prev_tx<'a>(prev_txs: &'a [SignTxPrevTx], tx_hash_bytes: &[u8]) -> Result<&'a SignTxPrevTx> {
+fn find_prev_tx<'a>(
+    prev_txs: &'a [SignTxPrevTx],
+    tx_hash_bytes: &[u8],
+) -> Result<&'a SignTxPrevTx> {
     let tx_hash_hex = hex::encode(tx_hash_bytes);
     prev_txs
         .iter()
         .find(|tx| tx.hash == tx_hash_hex)
-        .ok_or_else(|| DeviceError::InvalidInput(
-            format!("Previous transaction {} not found in prev_txs", tx_hash_hex)
-        ).into())
+        .ok_or_else(|| {
+            DeviceError::InvalidInput(format!(
+                "Previous transaction {} not found in prev_txs",
+                tx_hash_hex
+            ))
+            .into()
+        })
 }
 
 /// Convert MultisigConfig to protobuf MultisigRedeemScriptType.
 fn convert_multisig(config: &MultisigConfig) -> Result<protos::bitcoin::MultisigRedeemScriptType> {
     use protos::bitcoin::multisig_redeem_script_type::HdNodePathType;
 
-    let pubkeys = config.pubkeys.iter().map(|pk| {
-        let node = if let Some(ref hd) = pk.node {
-            Some(protos::common::HdNodeType {
-                depth: hd.depth,
-                fingerprint: hd.fingerprint,
-                child_num: hd.child_num,
-                chain_code: hd.chain_code.clone(),
-                private_key: None,
-                public_key: hd.public_key.clone(),
-            })
-        } else if let Some(ref _xpub) = pk.xpub {
-            // When xpub is provided without an explicit node, the device expects
-            // the node field. The caller should provide the decoded HDNodeType.
-            // For now we leave node as a placeholder — the device will reject
-            // if neither node nor xpub resolves.
-            None
-        } else {
-            None
-        };
-
-        HdNodePathType {
-            node: node.unwrap_or_default(),
-            address_n: pk.address_n.clone(),
-        }
-    }).collect();
-
-    let signatures = config.signatures.as_ref()
-        .map(|sigs| sigs.iter().map(|s| {
-            if s.is_empty() {
-                vec![]
+    let pubkeys = config
+        .pubkeys
+        .iter()
+        .map(|pk| {
+            let node = if let Some(ref hd) = pk.node {
+                Some(protos::common::HdNodeType {
+                    depth: hd.depth,
+                    fingerprint: hd.fingerprint,
+                    child_num: hd.child_num,
+                    chain_code: hd.chain_code.clone(),
+                    private_key: None,
+                    public_key: hd.public_key.clone(),
+                })
+            } else if let Some(ref _xpub) = pk.xpub {
+                // When xpub is provided without an explicit node, the device expects
+                // the node field. The caller should provide the decoded HDNodeType.
+                // For now we leave node as a placeholder — the device will reject
+                // if neither node nor xpub resolves.
+                None
             } else {
-                hex::decode(s).unwrap_or_default()
+                None
+            };
+
+            HdNodePathType {
+                node: node.unwrap_or_default(),
+                address_n: pk.address_n.clone(),
             }
-        }).collect())
+        })
+        .collect();
+
+    let signatures = config
+        .signatures
+        .as_ref()
+        .map(|sigs| {
+            sigs.iter()
+                .map(|s| {
+                    if s.is_empty() {
+                        vec![]
+                    } else {
+                        hex::decode(s).unwrap_or_default()
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_else(|| vec![vec![]; config.pubkeys.len()]);
 
     Ok(protos::bitcoin::MultisigRedeemScriptType {
@@ -1251,16 +1432,23 @@ fn convert_multisig(config: &MultisigConfig) -> Result<protos::bitcoin::Multisig
 fn convert_payment_request(pr: &PaymentRequest) -> Result<protos::common::PaymentRequest> {
     use protos::common::payment_request::*;
 
-    let nonce = pr.nonce.as_ref()
+    let nonce = pr
+        .nonce
+        .as_ref()
         .map(|n| hex::decode(n))
         .transpose()
-        .map_err(|e| DeviceError::InvalidInput(format!("Invalid payment_request nonce hex: {}", e)))?;
+        .map_err(|e| {
+            DeviceError::InvalidInput(format!("Invalid payment_request nonce hex: {}", e))
+        })?;
 
-    let signature = hex::decode(&pr.signature)
-        .map_err(|e| DeviceError::InvalidInput(format!("Invalid payment_request signature hex: {}", e)))?;
+    let signature = hex::decode(&pr.signature).map_err(|e| {
+        DeviceError::InvalidInput(format!("Invalid payment_request signature hex: {}", e))
+    })?;
 
-    let memos = pr.memos.iter().map(|m| {
-        PaymentRequestMemo {
+    let memos = pr
+        .memos
+        .iter()
+        .map(|m| PaymentRequestMemo {
             text_memo: m.text_memo.as_ref().map(|t| TextMemo {
                 text: t.text.clone(),
             }),
@@ -1283,8 +1471,8 @@ fn convert_payment_request(pr: &PaymentRequest) -> Result<protos::common::Paymen
                 }
             }),
             text_details_memo: None,
-        }
-    }).collect();
+        })
+        .collect();
 
     let amount = pr.amount.map(|a| a.to_le_bytes().to_vec());
 
@@ -1307,11 +1495,11 @@ fn infer_script_type(path: &[u32]) -> ScriptType {
 
     let purpose = path[0] & !HARDENED;
     match purpose {
-        44 => ScriptType::SpendAddress,      // Legacy P2PKH
-        49 => ScriptType::SpendP2SHWitness,  // Nested SegWit
-        84 => ScriptType::SpendWitness,      // Native SegWit
-        86 => ScriptType::SpendTaproot,      // Taproot
-        _ => ScriptType::SpendWitness,       // Default to native SegWit
+        44 => ScriptType::SpendAddress,     // Legacy P2PKH
+        49 => ScriptType::SpendP2SHWitness, // Nested SegWit
+        84 => ScriptType::SpendWitness,     // Native SegWit
+        86 => ScriptType::SpendTaproot,     // Taproot
+        _ => ScriptType::SpendWitness,      // Default to native SegWit
     }
 }
 

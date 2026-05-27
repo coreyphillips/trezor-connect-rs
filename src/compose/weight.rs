@@ -14,24 +14,24 @@ const SEGWIT_OVERHEAD: usize = 2;
 /// Input weight for a given script type (in weight units).
 pub fn input_weight(script_type: ScriptType) -> usize {
     match script_type {
-        ScriptType::SpendAddress => 592,       // p2pkh: 4*148
-        ScriptType::SpendP2SHWitness => 364,   // p2sh-p2wpkh: nested segwit
-        ScriptType::SpendWitness => 272,       // p2wpkh: native segwit
-        ScriptType::SpendTaproot => 230,       // p2tr: taproot
-        ScriptType::SpendMultisig => 592,      // treat as p2pkh (varies by m-of-n)
-        ScriptType::External => 272,           // assume segwit for external
+        ScriptType::SpendAddress => 592,     // p2pkh: 4*148
+        ScriptType::SpendP2SHWitness => 364, // p2sh-p2wpkh: nested segwit
+        ScriptType::SpendWitness => 272,     // p2wpkh: native segwit
+        ScriptType::SpendTaproot => 230,     // p2tr: taproot
+        ScriptType::SpendMultisig => 592,    // treat as p2pkh (varies by m-of-n)
+        ScriptType::External => 272,         // assume segwit for external
     }
 }
 
 /// Output weight for a given script type (in weight units).
 pub fn output_weight(script_type: ScriptType) -> usize {
     match script_type {
-        ScriptType::SpendAddress => 136,       // p2pkh: 4*(8+1+25)
-        ScriptType::SpendP2SHWitness => 128,   // p2sh: 4*(8+1+23)
-        ScriptType::SpendWitness => 124,       // p2wpkh: 4*(8+1+22)
-        ScriptType::SpendTaproot => 172,       // p2tr: 4*(8+1+34)
-        ScriptType::SpendMultisig => 128,      // p2sh: 4*(8+1+23)
-        ScriptType::External => 124,           // assume p2wpkh
+        ScriptType::SpendAddress => 136,     // p2pkh: 4*(8+1+25)
+        ScriptType::SpendP2SHWitness => 128, // p2sh: 4*(8+1+23)
+        ScriptType::SpendWitness => 124,     // p2wpkh: 4*(8+1+22)
+        ScriptType::SpendTaproot => 172,     // p2tr: 4*(8+1+34)
+        ScriptType::SpendMultisig => 128,    // p2sh: 4*(8+1+23)
+        ScriptType::External => 124,         // assume p2wpkh
     }
 }
 
@@ -62,19 +62,16 @@ fn varint_weight(n: usize) -> usize {
 
 /// Whether any inputs are segwit (requiring the segwit overhead).
 fn has_segwit(input_types: &[ScriptType]) -> bool {
-    input_types.iter().any(|t| matches!(
-        t,
-        ScriptType::SpendWitness
-            | ScriptType::SpendP2SHWitness
-            | ScriptType::SpendTaproot
-    ))
+    input_types.iter().any(|t| {
+        matches!(
+            t,
+            ScriptType::SpendWitness | ScriptType::SpendP2SHWitness | ScriptType::SpendTaproot
+        )
+    })
 }
 
 /// Calculate total transaction weight from input and output weights.
-pub fn transaction_weight(
-    input_types: &[ScriptType],
-    output_weights: &[usize],
-) -> usize {
+pub fn transaction_weight(input_types: &[ScriptType], output_weights: &[usize]) -> usize {
     let mut weight = TX_BASE_WEIGHT;
 
     // Varint for input count
@@ -97,10 +94,17 @@ pub fn transaction_weight(
     if has_segwit(input_types) {
         weight += SEGWIT_OVERHEAD;
         // Each non-segwit input needs 1 WU for the empty witness stack (0x00)
-        let non_segwit_count = input_types.iter().filter(|t| !matches!(
-            t,
-            ScriptType::SpendWitness | ScriptType::SpendP2SHWitness | ScriptType::SpendTaproot
-        )).count();
+        let non_segwit_count = input_types
+            .iter()
+            .filter(|t| {
+                !matches!(
+                    t,
+                    ScriptType::SpendWitness
+                        | ScriptType::SpendP2SHWitness
+                        | ScriptType::SpendTaproot
+                )
+            })
+            .count();
         weight += non_segwit_count;
     }
 

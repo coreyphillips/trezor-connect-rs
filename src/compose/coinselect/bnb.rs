@@ -4,10 +4,10 @@
 //! UTXO combinations using depth-first search. Falls back if no exact
 //! match is found within the iteration limit.
 
-use crate::types::bitcoin::ScriptType;
-use crate::compose::{dust, weight};
-use super::finalize::{finalize, FinalizeResult};
+use super::finalize::{FinalizeResult, finalize};
 use super::{CoinSelectInput, CoinSelectOutput, CoinSelectResult};
+use crate::compose::{dust, weight};
+use crate::types::bitcoin::ScriptType;
 
 /// Maximum number of iterations before giving up.
 const MAX_TRIES: usize = 1_000_000;
@@ -57,7 +57,12 @@ pub fn branch_and_bound(
         let input_fee = weight::calculate_fee(fee_rate, weight::input_weight(input.script_type));
         if input.amount > input_fee {
             let effective_value = input.amount - input_fee;
-            optional.push((input.index, effective_value, input.script_type, input.amount));
+            optional.push((
+                input.index,
+                effective_value,
+                input.script_type,
+                input.amount,
+            ));
         }
     }
 
@@ -78,28 +83,36 @@ pub fn branch_and_bound(
         output_sum + base_weight_fee - required_sum
     } else {
         // Required inputs already cover everything — use finalize to decide about change
-        return Some(match finalize(
-            required_sum, output_sum, fee_rate, base_fee,
-            &required_types, &output_weights, change_script_type,
-        ) {
-            FinalizeResult::Success { fee, change_amount, has_change, weight } => {
-                CoinSelectResult::Success {
+        return Some(
+            match finalize(
+                required_sum,
+                output_sum,
+                fee_rate,
+                base_fee,
+                &required_types,
+                &output_weights,
+                change_script_type,
+            ) {
+                FinalizeResult::Success {
+                    fee,
+                    change_amount,
+                    has_change,
+                    weight,
+                } => CoinSelectResult::Success {
                     selected_inputs: required_indices,
                     fee,
                     change_amount,
                     has_change,
                     weight,
-                }
-            }
-            FinalizeResult::InsufficientFunds => return None,
-        });
+                },
+                FinalizeResult::InsufficientFunds => return None,
+            },
+        );
     };
 
     // Cost of change = fee for change output + dust threshold
-    let change_output_fee = weight::calculate_fee(
-        fee_rate,
-        weight::change_output_weight(change_script_type),
-    );
+    let change_output_fee =
+        weight::calculate_fee(fee_rate, weight::change_output_weight(change_script_type));
     let cost_of_change = change_output_fee + dust::dust_amount(change_script_type, fee_rate);
 
     // Filter out UTXOs whose effective value exceeds the target range.
@@ -162,23 +175,46 @@ pub fn branch_and_bound(
         selected[depth] = true;
         *current_sum += optional[depth].1;
         let stop = bnb_search(
-            depth + 1, optional, selected, current_sum, target,
-            cost_of_change, suffix_sums, result_selection, tries,
+            depth + 1,
+            optional,
+            selected,
+            current_sum,
+            target,
+            cost_of_change,
+            suffix_sums,
+            result_selection,
+            tries,
         );
-        if stop { return true; }
+        if stop {
+            return true;
+        }
 
         // Try excluding this input
         selected[depth] = false;
         *current_sum -= optional[depth].1;
         bnb_search(
-            depth + 1, optional, selected, current_sum, target,
-            cost_of_change, suffix_sums, result_selection, tries,
+            depth + 1,
+            optional,
+            selected,
+            current_sum,
+            target,
+            cost_of_change,
+            suffix_sums,
+            result_selection,
+            tries,
         )
     }
 
     let _stop = bnb_search(
-        0, &optional, &mut selected, &mut current_sum, target,
-        cost_of_change, &suffix_sums, &mut result_selection, &mut tries,
+        0,
+        &optional,
+        &mut selected,
+        &mut current_sum,
+        target,
+        cost_of_change,
+        &suffix_sums,
+        &mut result_selection,
+        &mut tries,
     );
 
     result_selection.and_then(|selection| {
@@ -195,18 +231,26 @@ pub fn branch_and_bound(
         }
 
         match finalize(
-            total_sum, output_sum, fee_rate, base_fee,
-            &all_types, &output_weights, change_script_type,
+            total_sum,
+            output_sum,
+            fee_rate,
+            base_fee,
+            &all_types,
+            &output_weights,
+            change_script_type,
         ) {
-            FinalizeResult::Success { fee, change_amount, has_change, weight } => {
-                Some(CoinSelectResult::Success {
-                    selected_inputs: all_indices,
-                    fee,
-                    change_amount,
-                    has_change,
-                    weight,
-                })
-            }
+            FinalizeResult::Success {
+                fee,
+                change_amount,
+                has_change,
+                weight,
+            } => Some(CoinSelectResult::Success {
+                selected_inputs: all_indices,
+                fee,
+                change_amount,
+                has_change,
+                weight,
+            }),
             FinalizeResult::InsufficientFunds => None,
         }
     })
@@ -257,26 +301,27 @@ mod tests {
     /// A single UTXO much larger than the target cannot be part of an exact-match solution.
     #[test]
     fn test_bnb_rejects_oversized_single_utxo() {
-        let inputs = vec![
-            make_input(0, 1_000_000),
-        ];
+        let inputs = vec![make_input(0, 1_000_000)];
         let outputs = vec![make_output(10_000)];
 
         let result = branch_and_bound(&inputs, &outputs, 1.0, 0, ScriptType::SpendWitness);
-        assert!(result.is_none(), "BnB should reject when only oversized UTXOs are available");
+        assert!(
+            result.is_none(),
+            "BnB should reject when only oversized UTXOs are available"
+        );
     }
 
     /// CRITICAL-2: Multiple oversized UTXOs should all be filtered.
     #[test]
     fn test_bnb_rejects_all_oversized_utxos() {
-        let inputs = vec![
-            make_input(0, 1_000_000),
-            make_input(1, 2_000_000),
-        ];
+        let inputs = vec![make_input(0, 1_000_000), make_input(1, 2_000_000)];
         let outputs = vec![make_output(100)];
 
         let result = branch_and_bound(&inputs, &outputs, 1.0, 0, ScriptType::SpendWitness);
-        assert!(result.is_none(), "BnB should return None when all UTXOs exceed target range");
+        assert!(
+            result.is_none(),
+            "BnB should return None when all UTXOs exceed target range"
+        );
     }
 
     /// CRITICAL-1: When BnB selects inputs with overshoot above dust, it should
@@ -300,20 +345,33 @@ mod tests {
         // UTXO: 11,200 sats → overshoot is ~1,090 sats
         // That's above dust (546), so finalize should add change.
 
-        let inputs = vec![
-            make_input(0, 11_200),
-        ];
+        let inputs = vec![make_input(0, 11_200)];
         let outputs = vec![make_output(10_000)];
 
         let result = branch_and_bound(&inputs, &outputs, 1.0, 0, ScriptType::SpendWitness);
 
-        if let Some(CoinSelectResult::Success { fee, change_amount, has_change, .. }) = result {
+        if let Some(CoinSelectResult::Success {
+            fee,
+            change_amount,
+            has_change,
+            ..
+        }) = result
+        {
             // Finalize should decide: the ~1,090 sat remainder is above dust (546)
             // If change is produced, verify the accounting
             if has_change {
-                assert!(change_amount >= 546, "Change should be above dust: got {}", change_amount);
-                assert_eq!(fee + change_amount + 10_000, 11_200,
-                    "fee({}) + change({}) + output(10000) should equal input(11200)", fee, change_amount);
+                assert!(
+                    change_amount >= 546,
+                    "Change should be above dust: got {}",
+                    change_amount
+                );
+                assert_eq!(
+                    fee + change_amount + 10_000,
+                    11_200,
+                    "fee({}) + change({}) + output(10000) should equal input(11200)",
+                    fee,
+                    change_amount
+                );
             } else {
                 // If finalize decided change isn't worth it (fee with change > remainder),
                 // fee should absorb the remainder
@@ -339,6 +397,9 @@ mod tests {
         let outputs = vec![make_output(10_000)];
 
         let result = branch_and_bound(&inputs, &outputs, 1.0, 0, ScriptType::SpendWitness);
-        assert!(result.is_none(), "BnB should bail when required UTXOs exist");
+        assert!(
+            result.is_none(),
+            "BnB should bail when required UTXOs exist"
+        );
     }
 }

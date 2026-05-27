@@ -5,8 +5,8 @@
 //! Trial levels are generated dynamically from configurable thresholds,
 //! matching the JS tryconfirmed.ts behavior.
 
-use crate::types::bitcoin::ScriptType;
 use super::coinselect::{self, CoinSelectInput, CoinSelectOutput, CoinSelectResult};
+use crate::types::bitcoin::ScriptType;
 
 /// Minimum confirmations required for coinbase UTXOs regardless of filter.
 const COINBASE_MIN_CONFIRMATIONS: u32 = 100;
@@ -34,17 +34,29 @@ fn generate_trials(own: u32, other: u32) -> Vec<ConfFilter> {
 
     // Phase 1: decrease own, keep other at max
     for i in (1..=own).rev() {
-        trials.push(ConfFilter { own_min: i, other_min: other });
+        trials.push(ConfFilter {
+            own_min: i,
+            other_min: other,
+        });
     }
 
     // Phase 2: decrease other, keep own at 1
     for i in (1..other).rev() {
-        trials.push(ConfFilter { own_min: 1, other_min: i });
+        trials.push(ConfFilter {
+            own_min: 1,
+            other_min: i,
+        });
     }
 
     // Phase 3: allow own unconfirmed, then all unconfirmed
-    trials.push(ConfFilter { own_min: 0, other_min: 1 });
-    trials.push(ConfFilter { own_min: 0, other_min: 0 });
+    trials.push(ConfFilter {
+        own_min: 0,
+        other_min: 1,
+    });
+    trials.push(ConfFilter {
+        own_min: 0,
+        other_min: 0,
+    });
 
     trials
 }
@@ -76,7 +88,9 @@ pub fn try_confirmed(
     let mut prev_usable_count: usize = 0;
 
     for filter in &trials {
-        let filtered: Vec<CoinSelectInput> = inputs.iter().enumerate()
+        let filtered: Vec<CoinSelectInput> = inputs
+            .iter()
+            .enumerate()
             .filter(|(i, input)| {
                 // Required inputs always pass
                 if input.required {
@@ -92,7 +106,11 @@ pub fn try_confirmed(
                 }
 
                 let is_own_utxo = is_own.get(*i).copied().unwrap_or(false);
-                let min_confs = if is_own_utxo { filter.own_min } else { filter.other_min };
+                let min_confs = if is_own_utxo {
+                    filter.own_min
+                } else {
+                    filter.other_min
+                };
                 confs >= min_confs
             })
             .map(|(_, input)| input.clone())
@@ -109,16 +127,23 @@ pub fn try_confirmed(
         }
         prev_usable_count = filtered.len();
 
-        let filtered_confs: Vec<u32> = filtered.iter()
+        let filtered_confs: Vec<u32> = filtered
+            .iter()
             .map(|input| confirmations.get(input.index).copied().unwrap_or(0))
             .collect();
-        let filtered_coinbase: Vec<bool> = filtered.iter()
+        let filtered_coinbase: Vec<bool> = filtered
+            .iter()
             .map(|input| coinbase_flags.get(input.index).copied().unwrap_or(false))
             .collect();
 
         let result = coinselect::coinselect(
-            &filtered, outputs, fee_rate, base_fee, change_script_type,
-            &filtered_confs, &filtered_coinbase,
+            &filtered,
+            outputs,
+            fee_rate,
+            base_fee,
+            change_script_type,
+            &filtered_confs,
+            &filtered_coinbase,
         );
 
         match result {

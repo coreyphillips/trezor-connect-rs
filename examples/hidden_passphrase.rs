@@ -30,8 +30,7 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 use trezor_connect_rs::{
-    Trezor, GetAddressParams, GetPublicKeyParams,
-    TrezorUiCallback, PassphraseResponse,
+    GetAddressParams, GetPublicKeyParams, PassphraseResponse, Trezor, TrezorUiCallback,
 };
 
 /// UI callback that opens a hidden wallet, either via host entry or by
@@ -75,7 +74,9 @@ impl TrezorUiCallback for HiddenWalletCallback {
         // Host entry: send our passphrase to open the hidden wallet.
         println!("\n--- Passphrase Entry On Host ---");
         println!("Unlocking hidden wallet with the supplied passphrase.");
-        PassphraseResponse::Hidden { value: self.passphrase.clone() }
+        PassphraseResponse::Hidden {
+            value: self.passphrase.clone(),
+        }
     }
 }
 
@@ -173,19 +174,23 @@ async fn main() -> trezor_connect_rs::Result<()> {
     // Derive from the hidden wallet. These keys/addresses belong to the wallet
     // defined by the passphrase — change the passphrase and they change.
     println!("\n--- Hidden Wallet Account (BIP84) ---");
-    let pubkey = device.get_public_key(GetPublicKeyParams {
-        path: "m/84'/0'/0'".into(),
-        show_on_trezor: false,
-        ..Default::default()
-    }).await?;
+    let pubkey = device
+        .get_public_key(GetPublicKeyParams {
+            path: "m/84'/0'/0'".into(),
+            show_on_trezor: false,
+            ..Default::default()
+        })
+        .await?;
     println!("Account xpub: {}", pubkey.xpub);
 
     println!("\n--- Hidden Wallet First Receive Address ---");
-    let address = device.get_address(GetAddressParams {
-        path: "m/84'/0'/0'/0/0".into(),
-        show_on_trezor: false,
-        ..Default::default()
-    }).await?;
+    let address = device
+        .get_address(GetAddressParams {
+            path: "m/84'/0'/0'/0/0".into(),
+            show_on_trezor: false,
+            ..Default::default()
+        })
+        .await?;
     println!("Address: {}", address.address);
     println!("Path:    {}", address.serialized_path);
 

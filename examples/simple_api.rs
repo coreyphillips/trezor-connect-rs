@@ -8,8 +8,8 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 use trezor_connect_rs::{
-    Trezor, GetAddressParams, GetPublicKeyParams, SignMessageParams, VerifyMessageParams,
-    TrezorUiCallback, PassphraseResponse,
+    GetAddressParams, GetPublicKeyParams, PassphraseResponse, SignMessageParams, Trezor,
+    TrezorUiCallback, VerifyMessageParams,
 };
 
 /// UI callback that prompts for PIN and passphrase via stdin.
@@ -126,7 +126,12 @@ async fn main() -> trezor_connect_rs::Result<()> {
 
     println!("\nFound {} device(s):", devices.len());
     for (i, device) in devices.iter().enumerate() {
-        println!("  [{}] {} ({})", i, device.display_name(), device.transport_type);
+        println!(
+            "  [{}] {} ({})",
+            i,
+            device.display_name(),
+            device.transport_type
+        );
     }
 
     // Let user select a device if multiple found
@@ -148,30 +153,39 @@ async fn main() -> trezor_connect_rs::Result<()> {
 
     // Initialize and get features
     let features = device.initialize().await?;
-    println!("Connected to: {}", features.label.as_deref().unwrap_or("Unnamed Trezor"));
+    println!(
+        "Connected to: {}",
+        features.label.as_deref().unwrap_or("Unnamed Trezor")
+    );
     println!("  Model: {:?}", features.model);
-    println!("  Firmware: {}.{}.{}",
+    println!(
+        "  Firmware: {}.{}.{}",
         features.major_version.unwrap_or(0),
         features.minor_version.unwrap_or(0),
-        features.patch_version.unwrap_or(0));
+        features.patch_version.unwrap_or(0)
+    );
 
     // Get Bitcoin address
     println!("\n--- Get Address ---");
-    let address = device.get_address(GetAddressParams {
-        path: "m/84'/0'/0'/0/0".into(),
-        show_on_trezor: false,
-        ..Default::default()
-    }).await?;
+    let address = device
+        .get_address(GetAddressParams {
+            path: "m/84'/0'/0'/0/0".into(),
+            show_on_trezor: false,
+            ..Default::default()
+        })
+        .await?;
     println!("Address: {}", address.address);
     println!("Path: {}", address.serialized_path);
 
     // Get public key
     println!("\n--- Get Public Key ---");
-    let pubkey = device.get_public_key(GetPublicKeyParams {
-        path: "m/84'/0'/0'".into(),
-        show_on_trezor: false,
-        ..Default::default()
-    }).await?;
+    let pubkey = device
+        .get_public_key(GetPublicKeyParams {
+            path: "m/84'/0'/0'".into(),
+            show_on_trezor: false,
+            ..Default::default()
+        })
+        .await?;
     println!("XPub: {}", pubkey.xpub);
     println!("Path: {}", pubkey.serialized_path);
 
@@ -179,23 +193,27 @@ async fn main() -> trezor_connect_rs::Result<()> {
     println!("\n--- Sign Message ---");
     println!("Please confirm the message on your device...");
     let message = "Hello from Rust!";
-    let signature = device.sign_message(SignMessageParams {
-        path: "m/84'/0'/0'/0/0".into(),
-        message: message.into(),
-        ..Default::default()
-    }).await?;
+    let signature = device
+        .sign_message(SignMessageParams {
+            path: "m/84'/0'/0'/0/0".into(),
+            message: message.into(),
+            ..Default::default()
+        })
+        .await?;
     println!("Signed: \"{}\"", message);
     println!("Address: {}", signature.address);
     println!("Signature: {}", signature.signature);
 
     // Verify message
     println!("\n--- Verify Message ---");
-    let valid = device.verify_message(VerifyMessageParams {
-        address: signature.address.clone(),
-        signature: signature.signature.clone(),
-        message: message.into(),
-        ..Default::default()
-    }).await?;
+    let valid = device
+        .verify_message(VerifyMessageParams {
+            address: signature.address.clone(),
+            signature: signature.signature.clone(),
+            message: message.into(),
+            ..Default::default()
+        })
+        .await?;
     println!("Signature valid: {}", valid);
 
     // Disconnect

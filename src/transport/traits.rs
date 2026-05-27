@@ -1,7 +1,7 @@
 //! Transport trait definitions.
 
-use async_trait::async_trait;
 use crate::error::Result;
+use async_trait::async_trait;
 
 /// Device descriptor returned from enumeration
 #[derive(Debug, Clone)]
@@ -56,12 +56,7 @@ pub trait Transport: Send + Sync {
     async fn release(&self, session: &str) -> Result<()>;
 
     /// Call a method on the device
-    async fn call(
-        &self,
-        session: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)>;
+    async fn call(&self, session: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)>;
 
     /// Stop the transport
     fn stop(&mut self);

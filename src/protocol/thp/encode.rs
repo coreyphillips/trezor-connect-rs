@@ -4,7 +4,7 @@
 
 use super::crypto::*;
 use super::state::ThpState;
-use crate::constants::{thp_control, THP_HEADER_SIZE, THP_MESSAGE_LEN_SIZE};
+use crate::constants::{THP_HEADER_SIZE, THP_MESSAGE_LEN_SIZE, thp_control};
 use crate::error::{Result, ThpError};
 
 /// Encode a THP message
@@ -17,7 +17,9 @@ use crate::error::{Result, ThpError};
 /// and appended at the end.
 pub fn encode_thp_message(state: &ThpState, message_type: u16, data: &[u8]) -> Result<Vec<u8>> {
     if state.nonce_exhausted() {
-        return Err(ThpError::EncryptionError("Nonce exhausted: re-key required".to_string()).into());
+        return Err(
+            ThpError::EncryptionError("Nonce exhausted: re-key required".to_string()).into(),
+        );
     }
 
     let channel = state.channel();
@@ -36,7 +38,8 @@ pub fn encode_thp_message(state: &ThpState, message_type: u16, data: &[u8]) -> R
 
     // Encrypt payload if paired, otherwise send plaintext
     let payload = if state.is_paired() {
-        let creds = state.handshake_credentials()
+        let creds = state
+            .handshake_credentials()
             .ok_or(ThpError::StateMissing)?;
 
         // Build plaintext with session_id + message_type + data
@@ -53,7 +56,8 @@ pub fn encode_thp_message(state: &ThpState, message_type: u16, data: &[u8]) -> R
 
     // Length includes payload + CRC
     let length = payload.len() as u16 + CRC_LENGTH as u16;
-    let mut message = Vec::with_capacity(THP_HEADER_SIZE + THP_MESSAGE_LEN_SIZE + payload.len() + CRC_LENGTH);
+    let mut message =
+        Vec::with_capacity(THP_HEADER_SIZE + THP_MESSAGE_LEN_SIZE + payload.len() + CRC_LENGTH);
 
     // Header
     message.push(control_byte);
@@ -231,7 +235,8 @@ pub fn encode_encrypted_message(
     let length: u16 = encrypted.len() as u16 + CRC_LENGTH as u16;
 
     // Build final message
-    let mut message = Vec::with_capacity(THP_HEADER_SIZE + THP_MESSAGE_LEN_SIZE + encrypted.len() + CRC_LENGTH);
+    let mut message =
+        Vec::with_capacity(THP_HEADER_SIZE + THP_MESSAGE_LEN_SIZE + encrypted.len() + CRC_LENGTH);
 
     // Control byte
     message.push(thp_control::ENCRYPTED | (sync_bit << 4));
@@ -259,7 +264,11 @@ fn encrypt_payload(state: &ThpState, key: &[u8], plaintext: &[u8]) -> Result<Vec
         .map_err(|_| ThpError::EncryptionError("Invalid key length".to_string()))?;
 
     let send_nonce = state.send_nonce();
-    log::debug!("[THP] Encrypting with send_nonce={}, plaintext={} bytes", send_nonce, plaintext.len());
+    log::debug!(
+        "[THP] Encrypting with send_nonce={}, plaintext={} bytes",
+        send_nonce,
+        plaintext.len()
+    );
     let iv = get_iv_from_nonce(send_nonce);
 
     // THP uses empty AAD for post-handshake encrypted messages

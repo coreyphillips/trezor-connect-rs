@@ -49,7 +49,10 @@ pub fn address_to_script_pubkey(address: &str) -> Vec<u8> {
     let addr_lower = address.to_lowercase();
 
     // Bech32/Bech32m (P2WPKH or P2TR)
-    if addr_lower.starts_with("bc1") || addr_lower.starts_with("tb1") || addr_lower.starts_with("bcrt1") {
+    if addr_lower.starts_with("bc1")
+        || addr_lower.starts_with("tb1")
+        || addr_lower.starts_with("bcrt1")
+    {
         // Find the separator '1' - for bech32, it's the last '1' in the string
         if let Some(sep_pos) = addr_lower.rfind('1') {
             let data_part = &addr_lower[sep_pos + 1..];
@@ -227,7 +230,7 @@ fn base58check_decode(input: &str) -> Option<Vec<u8>> {
     let payload = &bytes[..payload_len];
     let checksum = &bytes[payload_len..];
 
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let hash1 = Sha256::digest(payload);
     let hash2 = Sha256::digest(hash1);
 
@@ -249,13 +252,13 @@ pub fn sort_transaction(
     match strategy {
         SortingStrategy::Bip69 => {
             // Sort inputs by txid (as raw bytes via hex), then by vout
-            inputs.sort_by(|a, b| {
-                a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout))
-            });
+            inputs.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
             // Sort outputs by amount, then by scriptPubKey bytes (BIP69 spec)
             outputs.sort_by(|a, b| {
-                a.amount.cmp(&b.amount).then(a.script_pubkey.cmp(&b.script_pubkey))
+                a.amount
+                    .cmp(&b.amount)
+                    .then(a.script_pubkey.cmp(&b.script_pubkey))
             });
         }
         SortingStrategy::Random => {
@@ -294,13 +297,35 @@ mod tests {
     #[test]
     fn test_bip69_sort_inputs() {
         let mut inputs = vec![
-            SortableInput { index: 0, txid: "bbbb".into(), vout: 1 },
-            SortableInput { index: 1, txid: "aaaa".into(), vout: 0 },
-            SortableInput { index: 2, txid: "aaaa".into(), vout: 2 },
+            SortableInput {
+                index: 0,
+                txid: "bbbb".into(),
+                vout: 1,
+            },
+            SortableInput {
+                index: 1,
+                txid: "aaaa".into(),
+                vout: 0,
+            },
+            SortableInput {
+                index: 2,
+                txid: "aaaa".into(),
+                vout: 2,
+            },
         ];
         let mut outputs = vec![
-            SortableOutput { index: 0, amount: 5000, script_pubkey: vec![0xcc], is_change: false },
-            SortableOutput { index: 1, amount: 1000, script_pubkey: vec![0xaa], is_change: false },
+            SortableOutput {
+                index: 0,
+                amount: 5000,
+                script_pubkey: vec![0xcc],
+                is_change: false,
+            },
+            SortableOutput {
+                index: 1,
+                amount: 1000,
+                script_pubkey: vec![0xaa],
+                is_change: false,
+            },
         ];
 
         let perm = sort_transaction(&mut inputs, &mut outputs, SortingStrategy::Bip69);
@@ -323,12 +348,30 @@ mod tests {
     #[test]
     fn test_none_sort_preserves_order() {
         let mut inputs = vec![
-            SortableInput { index: 0, txid: "bb".into(), vout: 1 },
-            SortableInput { index: 1, txid: "aa".into(), vout: 0 },
+            SortableInput {
+                index: 0,
+                txid: "bb".into(),
+                vout: 1,
+            },
+            SortableInput {
+                index: 1,
+                txid: "aa".into(),
+                vout: 0,
+            },
         ];
         let mut outputs = vec![
-            SortableOutput { index: 0, amount: 5000, script_pubkey: vec![0xcc], is_change: false },
-            SortableOutput { index: 1, amount: 1000, script_pubkey: vec![0xaa], is_change: false },
+            SortableOutput {
+                index: 0,
+                amount: 5000,
+                script_pubkey: vec![0xcc],
+                is_change: false,
+            },
+            SortableOutput {
+                index: 1,
+                amount: 1000,
+                script_pubkey: vec![0xaa],
+                is_change: false,
+            },
         ];
 
         let perm = sort_transaction(&mut inputs, &mut outputs, SortingStrategy::None);
@@ -341,12 +384,24 @@ mod tests {
     #[test]
     fn test_bip69_sort_outputs_by_script_pubkey() {
         // Two outputs with same amount but different scriptPubKeys
-        let mut inputs = vec![
-            SortableInput { index: 0, txid: "aa".into(), vout: 0 },
-        ];
+        let mut inputs = vec![SortableInput {
+            index: 0,
+            txid: "aa".into(),
+            vout: 0,
+        }];
         let mut outputs = vec![
-            SortableOutput { index: 0, amount: 1000, script_pubkey: vec![0x76, 0xa9], is_change: false },
-            SortableOutput { index: 1, amount: 1000, script_pubkey: vec![0x00, 0x14], is_change: false },
+            SortableOutput {
+                index: 0,
+                amount: 1000,
+                script_pubkey: vec![0x76, 0xa9],
+                is_change: false,
+            },
+            SortableOutput {
+                index: 1,
+                amount: 1000,
+                script_pubkey: vec![0x00, 0x14],
+                is_change: false,
+            },
         ];
 
         let perm = sort_transaction(&mut inputs, &mut outputs, SortingStrategy::Bip69);
@@ -366,14 +421,19 @@ mod tests {
         assert_eq!(script[0], 0x00, "Witness version 0");
         assert_eq!(script[1], 0x14, "20-byte program push");
         assert_eq!(script.len(), 22, "P2WPKH script is 22 bytes");
-        assert_eq!(hex::encode(&script), "0014751e76e8199196d454941c45d1b3a323f1433bd6");
+        assert_eq!(
+            hex::encode(&script),
+            "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+        );
     }
 
     #[test]
     fn test_address_to_script_pubkey_p2tr() {
         // Known P2TR address: bc1pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3wf0qm
         // Witness version 1, 32-byte program
-        let script = address_to_script_pubkey("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0");
+        let script = address_to_script_pubkey(
+            "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
+        );
         assert!(!script.is_empty(), "Should decode P2TR address");
         assert_eq!(script[0], 0x51, "Witness version 1 = OP_1");
         assert_eq!(script[1], 0x20, "32-byte program push");

@@ -97,7 +97,12 @@ pub enum ComposedOutput {
     /// Payment to an address.
     Payment { address: String, amount: u64 },
     /// Change output back to own address.
-    Change { address: String, path: String, amount: u64, script_type: ScriptType },
+    Change {
+        address: String,
+        path: String,
+        amount: u64,
+        script_type: ScriptType,
+    },
     /// OP_RETURN data output.
     OpReturn { data_hex: String },
 }
@@ -203,77 +208,89 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
     }
 
     // Check if any output is send-max
-    let has_send_max = request.outputs.iter().any(|o| matches!(o, ComposeOutput::SendMax { .. } | ComposeOutput::SendMaxNoAddress));
+    let has_send_max = request.outputs.iter().any(|o| {
+        matches!(
+            o,
+            ComposeOutput::SendMax { .. } | ComposeOutput::SendMaxNoAddress
+        )
+    });
 
     // Check if all outputs have addresses (determines Final vs NonFinal)
-    let is_complete = request.outputs.iter().all(|o| matches!(
-        o,
-        ComposeOutput::Payment { .. } | ComposeOutput::SendMax { .. } | ComposeOutput::OpReturn { .. }
-    ));
+    let is_complete = request.outputs.iter().all(|o| {
+        matches!(
+            o,
+            ComposeOutput::Payment { .. }
+                | ComposeOutput::SendMax { .. }
+                | ComposeOutput::OpReturn { .. }
+        )
+    });
 
     // Transform inputs to CoinSelectInput
-    let mut cs_inputs: Vec<CoinSelectInput> = request.inputs.iter().enumerate().map(|(i, input)| {
-        CoinSelectInput {
+    let mut cs_inputs: Vec<CoinSelectInput> = request
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| CoinSelectInput {
             index: i,
             amount: input.amount,
             script_type: input.script_type,
             required: input.required,
             weight: weight::input_weight(input.script_type),
-        }
-    }).collect();
+        })
+        .collect();
 
     // Sort inputs by effective value (descending) for optimal coin selection.
     // This ensures the accumulative algorithm picks the most cost-effective UTXOs first.
     if request.sorting_strategy != SortingStrategy::None {
         cs_inputs.sort_by(|a, b| {
-            let score_a = a.amount as f64 - weight::calculate_fee(request.fee_rate, a.weight) as f64;
-            let score_b = b.amount as f64 - weight::calculate_fee(request.fee_rate, b.weight) as f64;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            let score_a =
+                a.amount as f64 - weight::calculate_fee(request.fee_rate, a.weight) as f64;
+            let score_b =
+                b.amount as f64 - weight::calculate_fee(request.fee_rate, b.weight) as f64;
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.index.cmp(&b.index))
         });
     }
 
     // Transform outputs to CoinSelectOutput
-    let cs_outputs: Vec<CoinSelectOutput> = request.outputs.iter().map(|output| {
-        match output {
-            ComposeOutput::Payment { address, amount } => {
-                CoinSelectOutput {
+    let cs_outputs: Vec<CoinSelectOutput> = request
+        .outputs
+        .iter()
+        .map(|output| {
+            match output {
+                ComposeOutput::Payment { address, amount } => CoinSelectOutput {
                     amount: *amount,
                     weight: weight::output_weight(script_type_from_address(address)),
                     is_send_max: false,
-                }
-            }
-            ComposeOutput::PaymentNoAddress { amount } => {
-                CoinSelectOutput {
+                },
+                ComposeOutput::PaymentNoAddress { amount } => CoinSelectOutput {
                     amount: *amount,
                     weight: weight::output_weight(request.change_script_type),
                     is_send_max: false,
-                }
-            }
-            ComposeOutput::SendMax { address } => {
-                CoinSelectOutput {
+                },
+                ComposeOutput::SendMax { address } => CoinSelectOutput {
                     amount: 0,
                     weight: weight::output_weight(script_type_from_address(address)),
                     is_send_max: true,
-                }
-            }
-            ComposeOutput::SendMaxNoAddress => {
-                CoinSelectOutput {
+                },
+                ComposeOutput::SendMaxNoAddress => CoinSelectOutput {
                     amount: 0,
                     weight: weight::output_weight(request.change_script_type),
                     is_send_max: true,
+                },
+                ComposeOutput::OpReturn { data_hex } => {
+                    let data_len = data_hex.len() / 2; // hex to bytes
+                    CoinSelectOutput {
+                        amount: 0,
+                        weight: weight::op_return_output_weight(data_len),
+                        is_send_max: false,
+                    }
                 }
             }
-            ComposeOutput::OpReturn { data_hex } => {
-                let data_len = data_hex.len() / 2; // hex to bytes
-                CoinSelectOutput {
-                    amount: 0,
-                    weight: weight::op_return_output_weight(data_len),
-                    is_send_max: false,
-                }
-            }
-        }
-    }).collect();
+        })
+        .collect();
 
     // Prepare confirmation data
     let confirmations: Vec<u32> = request.inputs.iter().map(|i| i.confirmations).collect();
@@ -285,29 +302,54 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
     // - Regular transactions go through tryConfirmed for progressive confirmation filtering.
     let result = if has_send_max {
         coinselect::split::split(
-            &cs_inputs, &cs_outputs, request.fee_rate, request.base_fee,
-            request.change_script_type, &confirmations, &coinbase_flags,
+            &cs_inputs,
+            &cs_outputs,
+            request.fee_rate,
+            request.base_fee,
+            request.change_script_type,
+            &confirmations,
+            &coinbase_flags,
         )
     } else {
         let is_own: Vec<bool> = request.inputs.iter().map(|i| i.own).collect();
         tryconfirmed::try_confirmed(
-            &cs_inputs, &cs_outputs, request.fee_rate, request.base_fee,
-            request.change_script_type, &confirmations, &is_own, &coinbase_flags,
-            None, None,
+            &cs_inputs,
+            &cs_outputs,
+            request.fee_rate,
+            request.base_fee,
+            request.change_script_type,
+            &confirmations,
+            &is_own,
+            &coinbase_flags,
+            None,
+            None,
         )
     };
 
     match result {
-        CoinSelectResult::InsufficientFunds => {
-            ComposeResult::Error(ComposeError::NotEnoughFunds)
-        }
-        CoinSelectResult::Success { selected_inputs, fee, change_amount, has_change, weight: tx_weight } => {
+        CoinSelectResult::InsufficientFunds => ComposeResult::Error(ComposeError::NotEnoughFunds),
+        CoinSelectResult::Success {
+            selected_inputs,
+            fee,
+            change_amount,
+            has_change,
+            weight: tx_weight,
+        } => {
             let vbytes = weight::weight_to_vbytes(tx_weight);
-            let fee_per_byte = if vbytes > 0 { fee as f64 / vbytes as f64 } else { 0.0 };
-            let output_sum: u64 = request.outputs.iter().map(|o| match o {
-                ComposeOutput::Payment { amount, .. } | ComposeOutput::PaymentNoAddress { amount } => *amount,
-                _ => 0,
-            }).sum();
+            let fee_per_byte = if vbytes > 0 {
+                fee as f64 / vbytes as f64
+            } else {
+                0.0
+            };
+            let output_sum: u64 = request
+                .outputs
+                .iter()
+                .map(|o| match o {
+                    ComposeOutput::Payment { amount, .. }
+                    | ComposeOutput::PaymentNoAddress { amount } => *amount,
+                    _ => 0,
+                })
+                .sum();
             let total_spent = output_sum + fee;
 
             if !is_complete {
@@ -321,33 +363,44 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
             }
 
             // Build composed inputs
-            let composed_inputs: Vec<ComposedInput> = selected_inputs.iter().map(|&idx| {
-                let input = &request.inputs[idx];
-                ComposedInput {
-                    index: idx,
-                    txid: input.txid.clone(),
-                    vout: input.vout,
-                    amount: input.amount,
-                    address: input.address.clone(),
-                    path: input.path.clone(),
-                    script_type: input.script_type,
-                }
-            }).collect();
+            let composed_inputs: Vec<ComposedInput> = selected_inputs
+                .iter()
+                .map(|&idx| {
+                    let input = &request.inputs[idx];
+                    ComposedInput {
+                        index: idx,
+                        txid: input.txid.clone(),
+                        vout: input.vout,
+                        amount: input.amount,
+                        address: input.address.clone(),
+                        path: input.path.clone(),
+                        script_type: input.script_type,
+                    }
+                })
+                .collect();
 
             // Build composed outputs
-            let mut composed_outputs: Vec<ComposedOutput> = request.outputs.iter().map(|o| match o {
-                ComposeOutput::Payment { address, amount } => {
-                    ComposedOutput::Payment { address: address.clone(), amount: *amount }
-                }
-                ComposeOutput::SendMax { address } => {
-                    // For non-send-max results, this shouldn't happen
-                    ComposedOutput::Payment { address: address.clone(), amount: 0 }
-                }
-                ComposeOutput::OpReturn { data_hex } => {
-                    ComposedOutput::OpReturn { data_hex: data_hex.clone() }
-                }
-                _ => unreachable!("Non-final outputs should be caught earlier"),
-            }).collect();
+            let mut composed_outputs: Vec<ComposedOutput> = request
+                .outputs
+                .iter()
+                .map(|o| match o {
+                    ComposeOutput::Payment { address, amount } => ComposedOutput::Payment {
+                        address: address.clone(),
+                        amount: *amount,
+                    },
+                    ComposeOutput::SendMax { address } => {
+                        // For non-send-max results, this shouldn't happen
+                        ComposedOutput::Payment {
+                            address: address.clone(),
+                            amount: 0,
+                        }
+                    }
+                    ComposeOutput::OpReturn { data_hex } => ComposedOutput::OpReturn {
+                        data_hex: data_hex.clone(),
+                    },
+                    _ => unreachable!("Non-final outputs should be caught earlier"),
+                })
+                .collect();
 
             // Add change output if needed
             if has_change && change_amount > 0 {
@@ -360,27 +413,38 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
             }
 
             // Apply sorting
-            let mut sortable_inputs: Vec<SortableInput> = composed_inputs.iter().enumerate()
+            let mut sortable_inputs: Vec<SortableInput> = composed_inputs
+                .iter()
+                .enumerate()
                 .map(|(i, ci)| SortableInput {
                     index: i,
                     txid: ci.txid.clone(),
                     vout: ci.vout,
-                }).collect();
-            let mut sortable_outputs: Vec<SortableOutput> = composed_outputs.iter().enumerate()
+                })
+                .collect();
+            let mut sortable_outputs: Vec<SortableOutput> = composed_outputs
+                .iter()
+                .enumerate()
                 .map(|(i, co)| {
                     let (amount, script_pubkey, is_change) = match co {
                         ComposedOutput::Payment { amount, address } => {
                             (*amount, sorting::address_to_script_pubkey(address), false)
                         }
-                        ComposedOutput::Change { amount, address, .. } => {
-                            (*amount, sorting::address_to_script_pubkey(address), true)
-                        }
+                        ComposedOutput::Change {
+                            amount, address, ..
+                        } => (*amount, sorting::address_to_script_pubkey(address), true),
                         ComposedOutput::OpReturn { data_hex } => {
                             (0, sorting::op_return_script_pubkey(data_hex), false)
                         }
                     };
-                    SortableOutput { index: i, amount, script_pubkey, is_change }
-                }).collect();
+                    SortableOutput {
+                        index: i,
+                        amount,
+                        script_pubkey,
+                        is_change,
+                    }
+                })
+                .collect();
 
             let outputs_permutation = sorting::sort_transaction(
                 &mut sortable_inputs,
@@ -389,10 +453,12 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
             );
 
             // Reorder inputs and outputs
-            let sorted_inputs: Vec<ComposedInput> = sortable_inputs.iter()
+            let sorted_inputs: Vec<ComposedInput> = sortable_inputs
+                .iter()
                 .map(|si| composed_inputs[si.index].clone())
                 .collect();
-            let sorted_outputs: Vec<ComposedOutput> = sortable_outputs.iter()
+            let sorted_outputs: Vec<ComposedOutput> = sortable_outputs
+                .iter()
                 .map(|so| composed_outputs[so.index].clone())
                 .collect();
 
@@ -406,9 +472,18 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
                 outputs_permutation,
             }
         }
-        CoinSelectResult::SendMax { selected_inputs, max_amount, fee, weight: tx_weight } => {
+        CoinSelectResult::SendMax {
+            selected_inputs,
+            max_amount,
+            fee,
+            weight: tx_weight,
+        } => {
             let vbytes = weight::weight_to_vbytes(tx_weight);
-            let fee_per_byte = if vbytes > 0 { fee as f64 / vbytes as f64 } else { 0.0 };
+            let fee_per_byte = if vbytes > 0 {
+                fee as f64 / vbytes as f64
+            } else {
+                0.0
+            };
             let total_spent = max_amount + fee;
 
             if !is_complete {
@@ -422,55 +497,75 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
             }
 
             // Build composed inputs
-            let composed_inputs: Vec<ComposedInput> = selected_inputs.iter().map(|&idx| {
-                let input = &request.inputs[idx];
-                ComposedInput {
-                    index: idx,
-                    txid: input.txid.clone(),
-                    vout: input.vout,
-                    amount: input.amount,
-                    address: input.address.clone(),
-                    path: input.path.clone(),
-                    script_type: input.script_type,
-                }
-            }).collect();
+            let composed_inputs: Vec<ComposedInput> = selected_inputs
+                .iter()
+                .map(|&idx| {
+                    let input = &request.inputs[idx];
+                    ComposedInput {
+                        index: idx,
+                        txid: input.txid.clone(),
+                        vout: input.vout,
+                        amount: input.amount,
+                        address: input.address.clone(),
+                        path: input.path.clone(),
+                        script_type: input.script_type,
+                    }
+                })
+                .collect();
 
             // Build composed outputs with send-max amount filled in
-            let composed_outputs: Vec<ComposedOutput> = request.outputs.iter().map(|o| match o {
-                ComposeOutput::Payment { address, amount } => {
-                    ComposedOutput::Payment { address: address.clone(), amount: *amount }
-                }
-                ComposeOutput::SendMax { address } => {
-                    ComposedOutput::Payment { address: address.clone(), amount: max_amount }
-                }
-                ComposeOutput::OpReturn { data_hex } => {
-                    ComposedOutput::OpReturn { data_hex: data_hex.clone() }
-                }
-                _ => unreachable!(),
-            }).collect();
+            let composed_outputs: Vec<ComposedOutput> = request
+                .outputs
+                .iter()
+                .map(|o| match o {
+                    ComposeOutput::Payment { address, amount } => ComposedOutput::Payment {
+                        address: address.clone(),
+                        amount: *amount,
+                    },
+                    ComposeOutput::SendMax { address } => ComposedOutput::Payment {
+                        address: address.clone(),
+                        amount: max_amount,
+                    },
+                    ComposeOutput::OpReturn { data_hex } => ComposedOutput::OpReturn {
+                        data_hex: data_hex.clone(),
+                    },
+                    _ => unreachable!(),
+                })
+                .collect();
 
             // Apply sorting
-            let mut sortable_inputs: Vec<SortableInput> = composed_inputs.iter().enumerate()
+            let mut sortable_inputs: Vec<SortableInput> = composed_inputs
+                .iter()
+                .enumerate()
                 .map(|(i, ci)| SortableInput {
                     index: i,
                     txid: ci.txid.clone(),
                     vout: ci.vout,
-                }).collect();
-            let mut sortable_outputs: Vec<SortableOutput> = composed_outputs.iter().enumerate()
+                })
+                .collect();
+            let mut sortable_outputs: Vec<SortableOutput> = composed_outputs
+                .iter()
+                .enumerate()
                 .map(|(i, co)| {
                     let (amount, script_pubkey, is_change) = match co {
                         ComposedOutput::Payment { amount, address } => {
                             (*amount, sorting::address_to_script_pubkey(address), false)
                         }
-                        ComposedOutput::Change { amount, address, .. } => {
-                            (*amount, sorting::address_to_script_pubkey(address), true)
-                        }
+                        ComposedOutput::Change {
+                            amount, address, ..
+                        } => (*amount, sorting::address_to_script_pubkey(address), true),
                         ComposedOutput::OpReturn { data_hex } => {
                             (0, sorting::op_return_script_pubkey(data_hex), false)
                         }
                     };
-                    SortableOutput { index: i, amount, script_pubkey, is_change }
-                }).collect();
+                    SortableOutput {
+                        index: i,
+                        amount,
+                        script_pubkey,
+                        is_change,
+                    }
+                })
+                .collect();
 
             let outputs_permutation = sorting::sort_transaction(
                 &mut sortable_inputs,
@@ -478,10 +573,12 @@ pub fn compose_tx(request: ComposeRequest) -> ComposeResult {
                 request.sorting_strategy,
             );
 
-            let sorted_inputs: Vec<ComposedInput> = sortable_inputs.iter()
+            let sorted_inputs: Vec<ComposedInput> = sortable_inputs
+                .iter()
                 .map(|si| composed_inputs[si.index].clone())
                 .collect();
-            let sorted_outputs: Vec<ComposedOutput> = sortable_outputs.iter()
+            let sorted_outputs: Vec<ComposedOutput> = sortable_outputs
+                .iter()
                 .map(|so| composed_outputs[so.index].clone())
                 .collect();
 
@@ -520,16 +617,11 @@ mod tests {
     #[test]
     fn test_compose_basic_payment() {
         let request = ComposeRequest {
-            inputs: vec![
-                make_utxo("aaaa", 0, 100_000),
-                make_utxo("bbbb", 1, 200_000),
-            ],
-            outputs: vec![
-                ComposeOutput::Payment {
-                    address: "bc1qrecipient".to_string(),
-                    amount: 50_000,
-                },
-            ],
+            inputs: vec![make_utxo("aaaa", 0, 100_000), make_utxo("bbbb", 1, 200_000)],
+            outputs: vec![ComposeOutput::Payment {
+                address: "bc1qrecipient".to_string(),
+                amount: 50_000,
+            }],
             fee_rate: 10.0,
             base_fee: 0,
             change_script_type: ScriptType::SpendWitness,
@@ -538,7 +630,13 @@ mod tests {
         };
 
         match compose_tx(request) {
-            ComposeResult::Final { fee, total_spent, inputs, outputs, .. } => {
+            ComposeResult::Final {
+                fee,
+                total_spent,
+                inputs,
+                outputs,
+                ..
+            } => {
                 assert!(fee > 0);
                 assert_eq!(total_spent, 50_000 + fee);
                 assert!(!inputs.is_empty());
@@ -551,15 +649,10 @@ mod tests {
     #[test]
     fn test_compose_send_max() {
         let request = ComposeRequest {
-            inputs: vec![
-                make_utxo("aaaa", 0, 100_000),
-                make_utxo("bbbb", 1, 200_000),
-            ],
-            outputs: vec![
-                ComposeOutput::SendMax {
-                    address: "bc1qrecipient".to_string(),
-                },
-            ],
+            inputs: vec![make_utxo("aaaa", 0, 100_000), make_utxo("bbbb", 1, 200_000)],
+            outputs: vec![ComposeOutput::SendMax {
+                address: "bc1qrecipient".to_string(),
+            }],
             fee_rate: 10.0,
             base_fee: 0,
             change_script_type: ScriptType::SpendWitness,
@@ -568,7 +661,13 @@ mod tests {
         };
 
         match compose_tx(request) {
-            ComposeResult::Final { fee, total_spent, inputs, outputs, .. } => {
+            ComposeResult::Final {
+                fee,
+                total_spent,
+                inputs,
+                outputs,
+                ..
+            } => {
                 assert!(fee > 0);
                 assert_eq!(inputs.len(), 2); // All UTXOs used for send-max
                 assert_eq!(outputs.len(), 1); // Just the send-max output
@@ -604,12 +703,10 @@ mod tests {
     fn test_compose_insufficient_funds() {
         let request = ComposeRequest {
             inputs: vec![make_utxo("aaaa", 0, 1_000)],
-            outputs: vec![
-                ComposeOutput::Payment {
-                    address: "bc1qrecipient".to_string(),
-                    amount: 1_000_000,
-                },
-            ],
+            outputs: vec![ComposeOutput::Payment {
+                address: "bc1qrecipient".to_string(),
+                amount: 1_000_000,
+            }],
             fee_rate: 10.0,
             base_fee: 0,
             change_script_type: ScriptType::SpendWitness,
@@ -707,30 +804,62 @@ mod tests {
 
         // P2PKH output is larger (136 WU) than P2WPKH (124 WU),
         // so the tx sending to P2PKH should be larger and have a higher fee.
-        assert!(bytes_p2pkh > bytes_p2wpkh,
-            "P2PKH output tx ({} vB) should be larger than P2WPKH ({} vB)", bytes_p2pkh, bytes_p2wpkh);
-        assert!(fee_p2pkh > fee_p2wpkh,
-            "P2PKH output fee ({}) should be higher than P2WPKH ({})", fee_p2pkh, fee_p2wpkh);
+        assert!(
+            bytes_p2pkh > bytes_p2wpkh,
+            "P2PKH output tx ({} vB) should be larger than P2WPKH ({} vB)",
+            bytes_p2pkh,
+            bytes_p2wpkh
+        );
+        assert!(
+            fee_p2pkh > fee_p2wpkh,
+            "P2PKH output fee ({}) should be higher than P2WPKH ({})",
+            fee_p2pkh,
+            fee_p2wpkh
+        );
     }
 
     #[test]
     fn test_script_type_from_address_inference() {
         // P2WPKH (bech32)
-        assert_eq!(script_type_from_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), ScriptType::SpendWitness);
+        assert_eq!(
+            script_type_from_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            ScriptType::SpendWitness
+        );
         // P2TR (bech32m)
-        assert_eq!(script_type_from_address("bc1ptest"), ScriptType::SpendTaproot);
+        assert_eq!(
+            script_type_from_address("bc1ptest"),
+            ScriptType::SpendTaproot
+        );
         // P2SH (base58 starting with 3)
-        assert_eq!(script_type_from_address("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), ScriptType::SpendP2SHWitness);
+        assert_eq!(
+            script_type_from_address("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"),
+            ScriptType::SpendP2SHWitness
+        );
         // P2PKH (base58 starting with 1)
-        assert_eq!(script_type_from_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"), ScriptType::SpendAddress);
+        assert_eq!(
+            script_type_from_address("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+            ScriptType::SpendAddress
+        );
         // Testnet P2WPKH
-        assert_eq!(script_type_from_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), ScriptType::SpendWitness);
+        assert_eq!(
+            script_type_from_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
+            ScriptType::SpendWitness
+        );
         // Testnet P2TR
-        assert_eq!(script_type_from_address("tb1ptest"), ScriptType::SpendTaproot);
+        assert_eq!(
+            script_type_from_address("tb1ptest"),
+            ScriptType::SpendTaproot
+        );
         // Regtest P2WPKH
-        assert_eq!(script_type_from_address("bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq"), ScriptType::SpendWitness);
+        assert_eq!(
+            script_type_from_address("bcrt1qj2gz3meule5mc4r4knv65vjds3g88rlxs0jlmq"),
+            ScriptType::SpendWitness
+        );
         // Regtest P2TR
-        assert_eq!(script_type_from_address("bcrt1ptest"), ScriptType::SpendTaproot);
+        assert_eq!(
+            script_type_from_address("bcrt1ptest"),
+            ScriptType::SpendTaproot
+        );
     }
 
     /// MEDIUM-2: Mixed script type UTXOs should get correct per-UTXO weights,
@@ -804,8 +933,12 @@ mod tests {
 
         // P2PKH input (592 WU) is heavier than P2WPKH (272 WU),
         // so the fee should be higher when spending a P2PKH UTXO
-        assert!(fee_p2pkh > fee_p2wpkh,
-            "P2PKH input fee ({}) should be higher than P2WPKH input fee ({})", fee_p2pkh, fee_p2wpkh);
+        assert!(
+            fee_p2pkh > fee_p2wpkh,
+            "P2PKH input fee ({}) should be higher than P2WPKH input fee ({})",
+            fee_p2pkh,
+            fee_p2wpkh
+        );
     }
 
     /// Test that compose_tx handles filtered inputs correctly:

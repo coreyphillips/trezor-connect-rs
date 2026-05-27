@@ -71,7 +71,10 @@ pub fn get_cpace_host_keys(code: &[u8], handshake_hash: &[u8]) -> CpaceHostKeys 
 }
 
 /// Compute shared secret from CPACE exchange
-pub fn get_shared_secret(trezor_cpace_pubkey: &[u8; 32], host_cpace_privkey: &[u8; 32]) -> [u8; 32] {
+pub fn get_shared_secret(
+    trezor_cpace_pubkey: &[u8; 32],
+    host_cpace_privkey: &[u8; 32],
+) -> [u8; 32] {
     // shared_secret = X25519(host_private, trezor_public)
     let (secret, _) = keypair_from_secret(host_cpace_privkey);
     let pubkey = x25519_dalek::PublicKey::from(*trezor_cpace_pubkey);
@@ -231,8 +234,8 @@ mod tests {
         let hash: [u8; 32] = [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // first 8 bytes = 0
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // remaining bytes are non-zero
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF,
         ];
 
         // Old (wrong) approach: only uses first 8 bytes → 0 % 1_000_000 = 0
@@ -246,8 +249,14 @@ mod tests {
 
         // The full 256-bit value is 2^192 - 1 (24 bytes of 0xFF).
         // 2^192 - 1 mod 1_000_000 = 709551615... let's just verify it's NOT zero
-        assert_ne!(new_value, 0, "Full 256-bit modulo should differ from 8-byte truncation");
-        assert!(new_value < 1_000_000, "Result should be a valid 6-digit code");
+        assert_ne!(
+            new_value, 0,
+            "Full 256-bit modulo should differ from 8-byte truncation"
+        );
+        assert!(
+            new_value < 1_000_000,
+            "Result should be a valid 6-digit code"
+        );
 
         // Verify exact value: (2^192 - 1) mod 1_000_000 = 512895
         // (verified with Python: (2**192 - 1) % 1_000_000 == 512895)

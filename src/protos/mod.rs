@@ -24,19 +24,20 @@ pub mod bitcoin {
 
 /// Management message types (Initialize, Features, etc.)
 pub mod management {
-    include!(concat!(env!("OUT_DIR"), "/hw.trezor.messages.management.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/hw.trezor.messages.management.rs"
+    ));
 }
 
 // Re-export commonly used types
-pub use messages::MessageType;
-pub use common::{
-    Success, Failure, ButtonRequest, ButtonAck, PinMatrixRequest, PinMatrixAck,
-    PassphraseRequest, PassphraseAck,
-};
-pub use management::{Initialize, Features, Ping, GetFeatures};
 pub use bitcoin::{
-    GetAddress, Address, GetPublicKey, PublicKey,
-    SignTx, TxRequest, TxAck, TxInput, TxOutput,
-    SignMessage, MessageSignature, VerifyMessage,
-    GetOwnershipProof, OwnershipProof,
+    Address, GetAddress, GetOwnershipProof, GetPublicKey, MessageSignature, OwnershipProof,
+    PublicKey, SignMessage, SignTx, TxAck, TxInput, TxOutput, TxRequest, VerifyMessage,
 };
+pub use common::{
+    ButtonAck, ButtonRequest, Failure, PassphraseAck, PassphraseRequest, PinMatrixAck,
+    PinMatrixRequest, Success,
+};
+pub use management::{Features, GetFeatures, Initialize, Ping};
+pub use messages::MessageType;

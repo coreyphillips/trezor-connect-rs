@@ -3,9 +3,9 @@
 //! Includes all eligible UTXOs and assigns the remaining balance
 //! (after fees and other outputs) to the send-max output.
 
-use crate::types::bitcoin::ScriptType;
-use crate::compose::{dust, weight};
 use super::{CoinSelectInput, CoinSelectOutput, CoinSelectResult};
+use crate::compose::{dust, weight};
+use crate::types::bitcoin::ScriptType;
 
 /// Minimum confirmations required for coinbase UTXOs.
 const COINBASE_MIN_CONFIRMATIONS: u32 = 100;
@@ -48,7 +48,8 @@ pub fn split(
     }
 
     // Calculate output sum (excluding send-max outputs)
-    let specified_sum: u64 = outputs.iter()
+    let specified_sum: u64 = outputs
+        .iter()
         .filter(|o| !o.is_send_max)
         .map(|o| o.amount)
         .sum();
@@ -97,22 +98,30 @@ mod tests {
 
     #[test]
     fn test_split_basic() {
-        let inputs = vec![
-            make_input(0, 50_000),
-            make_input(1, 80_000),
-        ];
-        let outputs = vec![
-            CoinSelectOutput {
-                amount: 0, // send-max
-                weight: output_weight(ScriptType::SpendWitness),
-                is_send_max: true,
-            },
-        ];
+        let inputs = vec![make_input(0, 50_000), make_input(1, 80_000)];
+        let outputs = vec![CoinSelectOutput {
+            amount: 0, // send-max
+            weight: output_weight(ScriptType::SpendWitness),
+            is_send_max: true,
+        }];
         let confs = vec![10, 10];
         let coinbase = vec![false, false];
 
-        match split(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness, &confs, &coinbase) {
-            CoinSelectResult::SendMax { max_amount, fee, selected_inputs, .. } => {
+        match split(
+            &inputs,
+            &outputs,
+            10.0,
+            0,
+            ScriptType::SpendWitness,
+            &confs,
+            &coinbase,
+        ) {
+            CoinSelectResult::SendMax {
+                max_amount,
+                fee,
+                selected_inputs,
+                ..
+            } => {
                 assert_eq!(selected_inputs.len(), 2);
                 assert!(max_amount > 0);
                 assert_eq!(max_amount + fee, 130_000);
@@ -123,23 +132,31 @@ mod tests {
 
     #[test]
     fn test_split_filters_coinbase() {
-        let inputs = vec![
-            make_input(0, 50_000),
-            make_input(1, 80_000),
-        ];
-        let outputs = vec![
-            CoinSelectOutput {
-                amount: 0,
-                weight: output_weight(ScriptType::SpendWitness),
-                is_send_max: true,
-            },
-        ];
+        let inputs = vec![make_input(0, 50_000), make_input(1, 80_000)];
+        let outputs = vec![CoinSelectOutput {
+            amount: 0,
+            weight: output_weight(ScriptType::SpendWitness),
+            is_send_max: true,
+        }];
         // Second input is coinbase with only 50 confirmations
         let confs = vec![10, 50];
         let coinbase = vec![false, true];
 
-        match split(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness, &confs, &coinbase) {
-            CoinSelectResult::SendMax { selected_inputs, max_amount, fee, .. } => {
+        match split(
+            &inputs,
+            &outputs,
+            10.0,
+            0,
+            ScriptType::SpendWitness,
+            &confs,
+            &coinbase,
+        ) {
+            CoinSelectResult::SendMax {
+                selected_inputs,
+                max_amount,
+                fee,
+                ..
+            } => {
                 // Only first input should be selected
                 assert_eq!(selected_inputs.len(), 1);
                 assert_eq!(selected_inputs[0], 0);
@@ -156,23 +173,42 @@ mod tests {
         let inputs = vec![
             make_input(0, 50_000),
             make_input(1, 80_000),
-            make_input(2, 50),  // Tiny UTXO — fee to spend exceeds value at 10 sat/vB
+            make_input(2, 50), // Tiny UTXO — fee to spend exceeds value at 10 sat/vB
         ];
-        let outputs = vec![
-            CoinSelectOutput {
-                amount: 0,
-                weight: output_weight(ScriptType::SpendWitness),
-                is_send_max: true,
-            },
-        ];
+        let outputs = vec![CoinSelectOutput {
+            amount: 0,
+            weight: output_weight(ScriptType::SpendWitness),
+            is_send_max: true,
+        }];
         let confs = vec![10, 10, 10];
         let coinbase = vec![false, false, false];
 
-        match split(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness, &confs, &coinbase) {
-            CoinSelectResult::SendMax { selected_inputs, max_amount, fee, .. } => {
+        match split(
+            &inputs,
+            &outputs,
+            10.0,
+            0,
+            ScriptType::SpendWitness,
+            &confs,
+            &coinbase,
+        ) {
+            CoinSelectResult::SendMax {
+                selected_inputs,
+                max_amount,
+                fee,
+                ..
+            } => {
                 // All 3 inputs should be included, even the tiny one
-                assert_eq!(selected_inputs.len(), 3, "Send-max should include all UTXOs");
-                assert_eq!(max_amount + fee, 130_050, "Total should equal sum of all inputs");
+                assert_eq!(
+                    selected_inputs.len(),
+                    3,
+                    "Send-max should include all UTXOs"
+                );
+                assert_eq!(
+                    max_amount + fee,
+                    130_050,
+                    "Total should equal sum of all inputs"
+                );
             }
             _ => panic!("Expected SendMax result"),
         }
@@ -181,17 +217,23 @@ mod tests {
     #[test]
     fn test_split_insufficient() {
         let inputs = vec![make_input(0, 100)]; // Very small input
-        let outputs = vec![
-            CoinSelectOutput {
-                amount: 0,
-                weight: output_weight(ScriptType::SpendWitness),
-                is_send_max: true,
-            },
-        ];
+        let outputs = vec![CoinSelectOutput {
+            amount: 0,
+            weight: output_weight(ScriptType::SpendWitness),
+            is_send_max: true,
+        }];
         let confs = vec![10];
         let coinbase = vec![false];
 
-        match split(&inputs, &outputs, 100.0, 0, ScriptType::SpendWitness, &confs, &coinbase) {
+        match split(
+            &inputs,
+            &outputs,
+            100.0,
+            0,
+            ScriptType::SpendWitness,
+            &confs,
+            &coinbase,
+        ) {
             CoinSelectResult::InsufficientFunds => {}
             _ => panic!("Expected insufficient funds"),
         }

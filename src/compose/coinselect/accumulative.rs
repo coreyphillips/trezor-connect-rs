@@ -3,10 +3,10 @@
 //! Iterates through UTXOs, adding them until the target is met.
 //! This is the fallback when Branch-and-Bound fails.
 
-use crate::types::bitcoin::ScriptType;
-use crate::compose::weight;
-use super::finalize::{finalize, FinalizeResult};
+use super::finalize::{FinalizeResult, finalize};
 use super::{CoinSelectInput, CoinSelectOutput, CoinSelectResult};
+use crate::compose::weight;
+use crate::types::bitcoin::ScriptType;
 
 /// Run the accumulative coin selection algorithm.
 ///
@@ -40,9 +40,20 @@ pub fn accumulative(
 
     // Try finalizing with required-only
     if !selected.is_empty() {
-        if let FinalizeResult::Success { fee, change_amount, has_change, weight: tx_weight } =
-            finalize(selected_sum, output_sum, fee_rate, base_fee, &selected_types, &output_weights, change_script_type)
-        {
+        if let FinalizeResult::Success {
+            fee,
+            change_amount,
+            has_change,
+            weight: tx_weight,
+        } = finalize(
+            selected_sum,
+            output_sum,
+            fee_rate,
+            base_fee,
+            &selected_types,
+            &output_weights,
+            change_script_type,
+        ) {
             return CoinSelectResult::Success {
                 selected_inputs: selected,
                 fee,
@@ -70,9 +81,20 @@ pub fn accumulative(
                 selected.push(input.index);
                 selected_sum += input.amount;
                 selected_types.push(input.script_type);
-                if let FinalizeResult::Success { fee, change_amount, has_change, weight: tx_weight } =
-                    finalize(selected_sum, output_sum, fee_rate, base_fee, &selected_types, &output_weights, change_script_type)
-                {
+                if let FinalizeResult::Success {
+                    fee,
+                    change_amount,
+                    has_change,
+                    weight: tx_weight,
+                } = finalize(
+                    selected_sum,
+                    output_sum,
+                    fee_rate,
+                    base_fee,
+                    &selected_types,
+                    &output_weights,
+                    change_script_type,
+                ) {
                     return CoinSelectResult::Success {
                         selected_inputs: selected,
                         fee,
@@ -90,9 +112,20 @@ pub fn accumulative(
         selected_types.push(input.script_type);
 
         // Try to finalize
-        if let FinalizeResult::Success { fee, change_amount, has_change, weight: tx_weight } =
-            finalize(selected_sum, output_sum, fee_rate, base_fee, &selected_types, &output_weights, change_script_type)
-        {
+        if let FinalizeResult::Success {
+            fee,
+            change_amount,
+            has_change,
+            weight: tx_weight,
+        } = finalize(
+            selected_sum,
+            output_sum,
+            fee_rate,
+            base_fee,
+            &selected_types,
+            &output_weights,
+            change_script_type,
+        ) {
             return CoinSelectResult::Success {
                 selected_inputs: selected,
                 fee,
@@ -131,14 +164,15 @@ mod tests {
 
     #[test]
     fn test_accumulative_basic() {
-        let inputs = vec![
-            make_input(0, 50_000, false),
-            make_input(1, 80_000, false),
-        ];
+        let inputs = vec![make_input(0, 50_000, false), make_input(1, 80_000, false)];
         let outputs = vec![make_output(60_000)];
 
         match accumulative(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness) {
-            CoinSelectResult::Success { selected_inputs, fee, .. } => {
+            CoinSelectResult::Success {
+                selected_inputs,
+                fee,
+                ..
+            } => {
                 assert!(!selected_inputs.is_empty());
                 assert!(fee > 0);
             }
@@ -148,14 +182,13 @@ mod tests {
 
     #[test]
     fn test_accumulative_required_only() {
-        let inputs = vec![
-            make_input(0, 100_000, true),
-            make_input(1, 50_000, false),
-        ];
+        let inputs = vec![make_input(0, 100_000, true), make_input(1, 50_000, false)];
         let outputs = vec![make_output(10_000)];
 
         match accumulative(&inputs, &outputs, 1.0, 0, ScriptType::SpendWitness) {
-            CoinSelectResult::Success { selected_inputs, .. } => {
+            CoinSelectResult::Success {
+                selected_inputs, ..
+            } => {
                 // Only the required input should be selected
                 assert_eq!(selected_inputs.len(), 1);
                 assert_eq!(selected_inputs[0], 0);
@@ -184,13 +217,15 @@ mod tests {
         // Verify the mechanism works: input 0 covers the output, and the
         // detrimental last input doesn't prevent success.
         let inputs = vec![
-            make_input(0, 100_000, false),  // covers output easily
-            make_input(1, 100, false),       // detrimental (100 < 680)
+            make_input(0, 100_000, false), // covers output easily
+            make_input(1, 100, false),     // detrimental (100 < 680)
         ];
         let outputs = vec![make_output(50_000)];
 
         match accumulative(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness) {
-            CoinSelectResult::Success { selected_inputs, .. } => {
+            CoinSelectResult::Success {
+                selected_inputs, ..
+            } => {
                 // Should succeed with just input 0 (doesn't need the detrimental one)
                 assert!(!selected_inputs.is_empty());
             }
@@ -213,11 +248,16 @@ mod tests {
         let outputs = vec![make_output(60_000)];
 
         match accumulative(&inputs, &outputs, 10.0, 0, ScriptType::SpendWitness) {
-            CoinSelectResult::Success { selected_inputs, .. } => {
+            CoinSelectResult::Success {
+                selected_inputs, ..
+            } => {
                 // All returned indices must be original indices (2, 3, or 4), never 0 or 1
                 for &idx in &selected_inputs {
-                    assert!(idx >= 2 && idx <= 4,
-                        "Expected original index (2..=4), got {}", idx);
+                    assert!(
+                        idx >= 2 && idx <= 4,
+                        "Expected original index (2..=4), got {}",
+                        idx
+                    );
                 }
             }
             _ => panic!("Expected success"),

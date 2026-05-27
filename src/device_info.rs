@@ -63,7 +63,7 @@ impl DeviceInfo {
             name,
             label: None,
             model: Some("Safe 7".to_string()), // Only Safe 7 supports Bluetooth
-            is_bootloader: false, // Bluetooth not available in bootloader mode
+            is_bootloader: false,              // Bluetooth not available in bootloader mode
         }
     }
 
@@ -122,7 +122,8 @@ mod tests {
 
     #[test]
     fn test_new_bluetooth() {
-        let info = DeviceInfo::new_bluetooth("AA:BB:CC:DD:EE:FF".into(), Some("Trezor Safe 7".into()));
+        let info =
+            DeviceInfo::new_bluetooth("AA:BB:CC:DD:EE:FF".into(), Some("Trezor Safe 7".into()));
         assert!(info.is_bluetooth());
         assert!(!info.is_usb());
         assert_eq!(info.name, Some("Trezor Safe 7".into()));

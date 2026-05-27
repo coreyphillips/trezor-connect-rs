@@ -25,7 +25,8 @@ use crate::transport::bluetooth::BluetoothTransport;
 ///
 /// This callback is invoked during Bluetooth pairing when the device
 /// displays a 6-digit code that the user must enter.
-pub type PairingCallback = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+pub type PairingCallback =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
 
 /// How credentials should be stored.
 enum CredentialBackendConfig {
@@ -126,7 +127,11 @@ impl TrezorBuilder {
     /// `app_name` identifies the application (e.g., "Bitkit").
     ///
     /// Defaults to `"trezor-connect-rs"` for both.
-    pub fn with_app_identity(mut self, host_name: impl Into<String>, app_name: impl Into<String>) -> Self {
+    pub fn with_app_identity(
+        mut self,
+        host_name: impl Into<String>,
+        app_name: impl Into<String>,
+    ) -> Self {
         self.host_name = host_name.into();
         self.app_name = app_name.into();
         self
@@ -181,9 +186,9 @@ impl TrezorBuilder {
                             // tokio::task::block_in_place + Handle::block_on.
                             let cb = cb.clone();
                             let handle = tokio::runtime::Handle::current();
-                            std::thread::spawn(move || {
-                                handle.block_on(cb())
-                            }).join().unwrap_or_default()
+                            std::thread::spawn(move || handle.block_on(cb()))
+                                .join()
+                                .unwrap_or_default()
                         }));
                     }
                     let _ = transport.init().await;
@@ -215,9 +220,9 @@ impl TrezorBuilder {
                             // synchronously, mirroring the USB transport above.
                             let cb = cb.clone();
                             let handle = tokio::runtime::Handle::current();
-                            std::thread::spawn(move || {
-                                handle.block_on(cb())
-                            }).join().unwrap_or_default()
+                            std::thread::spawn(move || handle.block_on(cb()))
+                                .join()
+                                .unwrap_or_default()
                         }));
                     }
                     let _ = transport.init().await;
@@ -354,7 +359,9 @@ impl Trezor {
     /// Connect to a USB device.
     #[cfg(feature = "usb")]
     async fn connect_usb(&mut self, device: &DeviceInfo) -> Result<ConnectedDevice> {
-        let transport = self.usb_transport.as_ref()
+        let transport = self
+            .usb_transport
+            .as_ref()
             .ok_or_else(|| TransportError::Usb("USB transport not initialized".to_string()))?;
 
         // Acquire session (this also detects THP and performs handshake if needed)
@@ -383,7 +390,7 @@ impl Trezor {
     #[cfg(not(feature = "usb"))]
     async fn connect_usb(&mut self, _device: &DeviceInfo) -> Result<ConnectedDevice> {
         Err(crate::TrezorError::Transport(TransportError::UnableToOpen(
-            "USB support not compiled (libusb has no iOS backend)".to_string()
+            "USB support not compiled (libusb has no iOS backend)".to_string(),
         )))
     }
 
@@ -393,8 +400,9 @@ impl Trezor {
         use crate::protocol::thp::state::ThpCredentials;
         use crate::transport::TransportApi;
 
-        let transport = self.ble_transport.as_ref()
-            .ok_or_else(|| TransportError::Bluetooth("Bluetooth transport not initialized".to_string()))?;
+        let transport = self.ble_transport.as_ref().ok_or_else(|| {
+            TransportError::Bluetooth("Bluetooth transport not initialized".to_string())
+        })?;
 
         // Open the device first so it has a protocol state, then load stored credentials
         TransportApi::open(transport.as_ref(), &device.path).await?;
@@ -409,7 +417,9 @@ impl Trezor {
                     credential: cred.credential.clone(),
                     autoconnect: false,
                 };
-                transport.add_device_credentials(&device.path, thp_creds).await;
+                transport
+                    .add_device_credentials(&device.path, thp_creds)
+                    .await;
             }
         }
 
@@ -443,11 +453,7 @@ impl Trezor {
         // Share transport via Arc clone
         let transport_box = Box::new(TransportWrapper::Bluetooth(Arc::clone(transport)));
 
-        let mut connected = ConnectedDevice::new(
-            device.clone(),
-            transport_box,
-            session,
-        );
+        let mut connected = ConnectedDevice::new(device.clone(), transport_box, session);
 
         // Bluetooth always uses THP
         connected.set_uses_thp(true);
@@ -463,7 +469,7 @@ impl Trezor {
     #[cfg(not(feature = "bluetooth"))]
     async fn connect_bluetooth(&mut self, _device: &DeviceInfo) -> Result<ConnectedDevice> {
         Err(TrezorError::Transport(TransportError::Bluetooth(
-            "Bluetooth support not compiled".to_string()
+            "Bluetooth support not compiled".to_string(),
         )))
     }
 
@@ -534,12 +540,7 @@ impl Transport for TransportWrapper {
         }
     }
 
-    async fn call(
-        &self,
-        session: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+    async fn call(&self, session: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)> {
         match self {
             #[cfg(feature = "usb")]
             TransportWrapper::Usb(t) => t.call(session, message_type, data).await,
@@ -569,7 +570,10 @@ mod tests {
         let builder = TrezorBuilder::new();
         assert!(builder.scan_usb);
         assert!(builder.scan_bluetooth);
-        assert!(matches!(builder.credential_backend, CredentialBackendConfig::None));
+        assert!(matches!(
+            builder.credential_backend,
+            CredentialBackendConfig::None
+        ));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::io::{self, Write};
 use std::sync::Arc;
 use trezor_connect_rs::{
-    TrezorClient, UsbTransport, Result, TrezorUiCallback, PassphraseResponse,
+    PassphraseResponse, Result, TrezorClient, TrezorUiCallback, UsbTransport,
     api::sign_tx::{SignTransactionParams, TxInput, TxOutput},
     transport::Transport,
 };
@@ -66,19 +66,20 @@ async fn main() -> Result<()> {
 
     // Initialize device
     let features = client.initialize().await?;
-    println!("Connected to: {}", features.label.as_deref().unwrap_or_default());
+    println!(
+        "Connected to: {}",
+        features.label.as_deref().unwrap_or_default()
+    );
 
     // Build transaction parameters
     // This is a dummy transaction for demonstration
     let params = SignTransactionParams {
-        inputs: vec![
-            TxInput::new(
-                "0000000000000000000000000000000000000000000000000000000000000001",
-                0,
-                "m/84'/0'/0'/0/0",
-                100000, // 0.001 BTC
-            ),
-        ],
+        inputs: vec![TxInput::new(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            0,
+            "m/84'/0'/0'/0/0",
+            100000, // 0.001 BTC
+        )],
         outputs: vec![
             TxOutput::to_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 90000),
             TxOutput::to_change("m/84'/0'/0'/1/0", 9000), // Change

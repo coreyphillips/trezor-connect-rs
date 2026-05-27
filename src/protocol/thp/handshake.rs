@@ -73,7 +73,10 @@ pub fn verify_stored_credential(
     trezor_ephemeral_pubkey: &[u8; 32],
 ) -> bool {
     // Compute SHA-256(trezor_static_pubkey || trezor_ephemeral_pubkey)
-    let h = hash_of_two(&credential.trezor_static_public_key, trezor_ephemeral_pubkey);
+    let h = hash_of_two(
+        &credential.trezor_static_public_key,
+        trezor_ephemeral_pubkey,
+    );
 
     // Compute X25519(h, trezor_static_pubkey)
     // h is used as the scalar (private key) for the X25519 operation
@@ -115,8 +118,7 @@ pub fn handle_handshake_init(
     h = hash_of_two(&h, &response.trezor_ephemeral_pubkey).to_vec();
 
     // Step 5: ck, k = HKDF(protocol_name, X25519(host_ephemeral_privkey, trezor_ephemeral_pubkey))
-    let trezor_ephemeral_pubkey =
-        x25519_dalek::PublicKey::from(response.trezor_ephemeral_pubkey);
+    let trezor_ephemeral_pubkey = x25519_dalek::PublicKey::from(response.trezor_ephemeral_pubkey);
     let shared_secret = x25519_dh(&host_ephemeral_secret, &trezor_ephemeral_pubkey);
     let (mut ck, mut k) = hkdf_derive(&protocol_name(), &shared_secret);
     log::debug!("[THP-CRYPTO] Step 5 key exchange complete");
@@ -129,7 +131,10 @@ pub fn handle_handshake_init(
     let mut ciphertext_with_tag = trezor_static_pubkey.to_vec();
     ciphertext_with_tag.extend_from_slice(trezor_static_tag);
 
-    let h_array: [u8; 32] = h.clone().try_into().map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
+    let h_array: [u8; 32] = h
+        .clone()
+        .try_into()
+        .map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
     let trezor_masked_static_pubkey = aes_gcm_decrypt(&k, &iv0, &h_array, &ciphertext_with_tag)?;
     log::debug!("[THP-CRYPTO] Step 6 decrypted masked static pubkey");
 
@@ -148,7 +153,10 @@ pub fn handle_handshake_init(
     log::debug!("[THP-CRYPTO] Step 8 key derivation complete");
 
     // Step 9: Verify tag
-    let h_array: [u8; 32] = h.clone().try_into().map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
+    let h_array: [u8; 32] = h
+        .clone()
+        .try_into()
+        .map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
     let mut tag_ciphertext = Vec::new();
     tag_ciphertext.extend_from_slice(&response.tag);
     let _empty = aes_gcm_decrypt(&k, &iv0, &h_array, &tag_ciphertext)?;
@@ -161,13 +169,19 @@ pub fn handle_handshake_init(
     // If credentials don't match, fall back to new pairing
     let verified_credential = stored_credential.and_then(|stored| {
         log::info!("[THP-CRYPTO] Verifying stored credential against device response...");
-        let result = verify_stored_credential(stored, &trezor_masked_pubkey_array, &response.trezor_ephemeral_pubkey);
+        let result = verify_stored_credential(
+            stored,
+            &trezor_masked_pubkey_array,
+            &response.trezor_ephemeral_pubkey,
+        );
         log::info!("[THP-CRYPTO] Credential verification result: {}", result);
         if result {
             log::info!("[THP-CRYPTO] Stored credential verified successfully - reconnecting");
             Some(stored)
         } else {
-            log::warn!("[THP-CRYPTO] Credential mismatch — stored trezor_pubkey does not match device");
+            log::warn!(
+                "[THP-CRYPTO] Credential mismatch — stored trezor_pubkey does not match device"
+            );
             None
         }
     });
@@ -185,9 +199,16 @@ pub fn handle_handshake_init(
 
     // Step 12: encrypted_host_static_pubkey = AES-GCM-ENCRYPT(key=k, IV=0^95 || 1, ad=h, plaintext=host_static_pubkey)
     let iv1 = get_iv_from_nonce(state.recv_nonce());
-    let h_array: [u8; 32] = h.clone().try_into().map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
-    let encrypted_host_static_pubkey = aes_gcm_encrypt(&k, &iv1, &h_array, host_static_pubkey.as_bytes())?;
-    log::debug!("[THP-CRYPTO] Step 12 host static pubkey encrypted ({} bytes)", encrypted_host_static_pubkey.len());
+    let h_array: [u8; 32] = h
+        .clone()
+        .try_into()
+        .map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
+    let encrypted_host_static_pubkey =
+        aes_gcm_encrypt(&k, &iv1, &h_array, host_static_pubkey.as_bytes())?;
+    log::debug!(
+        "[THP-CRYPTO] Step 12 host static pubkey encrypted ({} bytes)",
+        encrypted_host_static_pubkey.len()
+    );
 
     // Step 13: h = SHA-256(h || encrypted_host_static_pubkey)
     h = hash_of_two(&h_array, &encrypted_host_static_pubkey).to_vec();
@@ -200,7 +221,10 @@ pub fn handle_handshake_init(
     // Step 15-16: Create encrypted payload (include credential if reconnecting)
     // The payload is a protobuf-encoded ThpHandshakeCompletionReqNoisePayload message
     // with host_pairing_credential as field 1 (bytes)
-    let h_array: [u8; 32] = h.clone().try_into().map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
+    let h_array: [u8; 32] = h
+        .clone()
+        .try_into()
+        .map_err(|_| ThpError::HandshakeFailed("Invalid hash length".to_string()))?;
     let payload = if let Some(stored) = verified_credential {
         log::debug!("[THP-CRYPTO] Including verified credential in payload");
         // Encode as protobuf: field 1, wire type 2 (length-delimited)
@@ -214,7 +238,10 @@ pub fn handle_handshake_init(
         vec![]
     };
     let encrypted_payload = aes_gcm_encrypt(&k_final, &iv0, &h_array, &payload)?;
-    log::debug!("[THP-CRYPTO] Step 16 payload encrypted ({} bytes)", encrypted_payload.len());
+    log::debug!(
+        "[THP-CRYPTO] Step 16 payload encrypted ({} bytes)",
+        encrypted_payload.len()
+    );
 
     // HH2 and HH3: Derive final keys
     let (host_key, trezor_key) = hkdf_derive(&ck_final, &[]);
@@ -252,7 +279,10 @@ pub fn parse_handshake_completion_response(
     // This is a post-handshake transport message (not a Noise handshake step),
     // so AAD is empty — consistent with all other encrypt/decrypt operations.
     let iv0 = get_iv_from_nonce(0);
-    let trezor_key: [u8; 32] = creds.trezor_key.clone().try_into()
+    let trezor_key: [u8; 32] = creds
+        .trezor_key
+        .clone()
+        .try_into()
         .map_err(|_| ThpError::HandshakeFailed("Invalid trezor key".to_string()))?;
 
     let decrypted = aes_gcm_decrypt(&trezor_key, &iv0, &[], encrypted_response)?;
@@ -261,7 +291,11 @@ pub fn parse_handshake_completion_response(
     // The encrypted payload is 1 byte ciphertext + 16 byte GCM tag.
     // After decryption we get a single byte: 0=needs pairing, 1=paired, 2=autoconnect.
     // Pairing methods come from ThpDeviceProperties in channel allocation, not here.
-    let trezor_state = if decrypted.is_empty() { 0u8 } else { decrypted[0] };
+    let trezor_state = if decrypted.is_empty() {
+        0u8
+    } else {
+        decrypted[0]
+    };
 
     Ok(HandshakeCompletionResponse {
         trezor_state,

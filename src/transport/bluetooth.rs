@@ -9,24 +9,21 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::constants::{
-    BLE_CHARACTERISTIC_RX, BLE_CHARACTERISTIC_TX, BLE_CHUNK_SIZE, BLE_SERVICE_UUID,
-    thp_control,
+    BLE_CHARACTERISTIC_RX, BLE_CHARACTERISTIC_TX, BLE_CHUNK_SIZE, BLE_SERVICE_UUID, thp_control,
 };
-use crate::error::{Result, TransportError, ThpError};
-use zeroize::Zeroizing;
+use crate::error::{Result, ThpError, TransportError};
 use crate::protocol::thp::{
-    ProtocolThp, encode_channel_allocation_request, encode_handshake_init_request,
-    encode_handshake_completion_request, encode_ack, encode_encrypted_message,
-    handle_handshake_init, HandshakeInitResponse, get_handshake_hash,
-    parse_handshake_completion_response,
-    state::ThpHandshakeCredentials,
-    pairing_messages::encode_create_new_session,
+    HandshakeInitResponse, ProtocolThp, encode_ack, encode_channel_allocation_request,
+    encode_encrypted_message, encode_handshake_completion_request, encode_handshake_init_request,
+    get_handshake_hash, handle_handshake_init, pairing_messages::encode_create_new_session,
+    parse_handshake_completion_response, state::ThpHandshakeCredentials,
 };
-use crate::protocol::{chunk, Protocol};
+use crate::protocol::{Protocol, chunk};
 use crate::transport::{DeviceDescriptor, SessionManager, Transport, TransportApi};
+use zeroize::Zeroizing;
 
 use tokio::sync::mpsc;
 
@@ -237,7 +234,8 @@ impl BluetoothTransport {
         path: &str,
     ) -> Option<crate::protocol::thp::state::ThpCredentials> {
         let devices = self.devices.read().await;
-        devices.get(path)?
+        devices
+            .get(path)?
             .protocol
             .state()
             .pairing_credentials()
@@ -256,8 +254,12 @@ impl BluetoothTransport {
                 Err(e) => {
                     let error_str = e.to_string();
                     if error_str.contains("TransportBusy") && attempt < MAX_RETRIES {
-                        log::warn!("[BLE] TransportBusy error (attempt {}/{}), retrying in {}ms...",
-                            attempt, MAX_RETRIES, RETRY_DELAY_MS);
+                        log::warn!(
+                            "[BLE] TransportBusy error (attempt {}/{}), retrying in {}ms...",
+                            attempt,
+                            MAX_RETRIES,
+                            RETRY_DELAY_MS
+                        );
                         // Reset protocol state before retry
                         {
                             let mut devices = self.devices.write().await;
@@ -281,22 +283,32 @@ impl BluetoothTransport {
 
         // Step 1: Channel Allocation
         let channel_req = encode_channel_allocation_request();
-        log::debug!("[BLE] Sending channel allocation request ({} bytes): {:02x?}",
-            channel_req.len(), &channel_req);
+        log::debug!(
+            "[BLE] Sending channel allocation request ({} bytes): {:02x?}",
+            channel_req.len(),
+            &channel_req
+        );
         self.write_raw(path, &channel_req).await?;
         log::debug!("[BLE] Channel allocation request sent, waiting for response...");
 
         // Read channel allocation response (increase timeout for BLE latency)
-        let channel_resp = self.read_with_timeout(path, Duration::from_secs(10)).await?;
-        log::debug!("[BLE] Channel response: {:02x?}", &channel_resp[..channel_resp.len().min(16)]);
+        let channel_resp = self
+            .read_with_timeout(path, Duration::from_secs(10))
+            .await?;
+        log::debug!(
+            "[BLE] Channel response: {:02x?}",
+            &channel_resp[..channel_resp.len().min(16)]
+        );
 
         // Validate CRC on channel allocation response
         Self::validate_crc(&channel_resp)?;
 
         if channel_resp.is_empty() || channel_resp[0] != thp_control::CHANNEL_ALLOCATION_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected channel allocation response, got: {:02x}", channel_resp.get(0).unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected channel allocation response, got: {:02x}",
+                channel_resp.get(0).unwrap_or(&0)
+            ))
+            .into());
         }
 
         // Channel allocation response format:
@@ -304,12 +316,18 @@ impl BluetoothTransport {
         // The allocated channel is at payload offset 8 (after the nonce)
         // Payload starts at byte 5, so allocated channel is at bytes 13-14
         if channel_resp.len() < 15 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Channel allocation response too short: {} bytes", channel_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Channel allocation response too short: {} bytes",
+                channel_resp.len()
+            ))
+            .into());
         }
         let channel: [u8; 2] = [channel_resp[13], channel_resp[14]];
-        log::info!("[BLE] Received allocated channel: {:02x}{:02x}", channel[0], channel[1]);
+        log::info!(
+            "[BLE] Received allocated channel: {:02x}{:02x}",
+            channel[0],
+            channel[1]
+        );
 
         // Extract device properties from channel allocation response
         // Payload starts at byte 5, format: nonce(8) + channel(2) + properties... + crc(4)
@@ -321,13 +339,18 @@ impl BluetoothTransport {
         } else {
             vec![]
         };
-        log::debug!("[BLE] Device properties ({} bytes): {:02x?}",
-            device_properties.len(), &device_properties[..device_properties.len().min(16)]);
+        log::debug!(
+            "[BLE] Device properties ({} bytes): {:02x?}",
+            device_properties.len(),
+            &device_properties[..device_properties.len().min(16)]
+        );
 
         // Update protocol state with channel
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().set_channel(channel);
         }
 
@@ -341,7 +364,10 @@ impl BluetoothTransport {
         let stored_credential = {
             let devices = self.devices.read().await;
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
-            device.protocol.state().pairing_credentials()
+            device
+                .protocol
+                .state()
+                .pairing_credentials()
                 .first()
                 .and_then(|creds| {
                     let host_key = hex::decode(&creds.host_static_key).ok()?;
@@ -369,13 +395,16 @@ impl BluetoothTransport {
         // credential matching happens in handle_handshake_init.
         let try_to_unlock = false;
         if stored_credential.is_some() {
-            log::info!("[BLE] Found stored credentials - will attempt reconnection without pairing");
+            log::info!(
+                "[BLE] Found stored credentials - will attempt reconnection without pairing"
+            );
         }
 
         // Step 2: Handshake Init
         log::debug!("[BLE] Generating ephemeral keypair...");
         let ephemeral_secret: Zeroizing<[u8; 32]> = Zeroizing::new(rand::random());
-        let (_, host_ephemeral_pubkey) = crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
+        let (_, host_ephemeral_pubkey) =
+            crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
 
         // Get current send_bit and send handshake init request
         let send_bit = {
@@ -383,7 +412,11 @@ impl BluetoothTransport {
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state().send_bit()
         };
-        log::debug!("[BLE] Sending handshake init request (send_bit={}, try_to_unlock={})...", send_bit, try_to_unlock);
+        log::debug!(
+            "[BLE] Sending handshake init request (send_bit={}, try_to_unlock={})...",
+            send_bit,
+            try_to_unlock
+        );
         let init_req = encode_handshake_init_request(
             &channel,
             host_ephemeral_pubkey.as_bytes(),
@@ -395,14 +428,22 @@ impl BluetoothTransport {
         // Toggle send_bit after sending
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().update_sync_bit(true);
-            log::debug!("[BLE] Toggled send_bit to {}", device.protocol.state().send_bit());
+            log::debug!(
+                "[BLE] Toggled send_bit to {}",
+                device.protocol.state().send_bit()
+            );
         }
 
         // Read handshake init response (skipping ACK)
         let init_resp = self.read_response(path, Duration::from_secs(10)).await?;
-        log::debug!("[BLE] Handshake init response: {:02x?}", &init_resp[..init_resp.len().min(32)]);
+        log::debug!(
+            "[BLE] Handshake init response: {:02x?}",
+            &init_resp[..init_resp.len().min(32)]
+        );
 
         // Check for THP error
         if !init_resp.is_empty() && init_resp[0] == thp_control::ERROR {
@@ -414,15 +455,19 @@ impl BluetoothTransport {
                 0x05 => "DeviceLocked",
                 _ => "Unknown",
             };
-            return Err(ThpError::HandshakeFailed(
-                format!("Device returned THP error: {} (0x{:02x})", error_name, error_code)
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Device returned THP error: {} (0x{:02x})",
+                error_name, error_code
+            ))
+            .into());
         }
 
         if init_resp.is_empty() || (init_resp[0] & 0xe7) != thp_control::HANDSHAKE_INIT_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected handshake init response, got: {:02x}", init_resp.get(0).unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected handshake init response, got: {:02x}",
+                init_resp.get(0).unwrap_or(&0)
+            ))
+            .into());
         }
 
         // Send ACK for init response
@@ -438,26 +483,38 @@ impl BluetoothTransport {
         // Header is 5 bytes: control(1) + channel(2) + length(2)
         // Then: trezor_ephemeral_pubkey(32) + encrypted_static_pubkey(48) + tag(16)
         if init_resp.len() < 5 + 32 + 48 + 16 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Handshake init response too short: {} bytes", init_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Handshake init response too short: {} bytes",
+                init_resp.len()
+            ))
+            .into());
         }
 
         let payload = &init_resp[5..];
-        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32].try_into()
+        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid ephemeral pubkey".to_string()))?;
         let trezor_encrypted_static = payload[32..80].to_vec();
-        let tag: [u8; 16] = payload[80..96].try_into()
+        let tag: [u8; 16] = payload[80..96]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid tag".to_string()))?;
 
-        log::debug!("[BLE] Trezor ephemeral pubkey: {} bytes", trezor_ephemeral_pubkey.len());
+        log::debug!(
+            "[BLE] Trezor ephemeral pubkey: {} bytes",
+            trezor_ephemeral_pubkey.len()
+        );
 
         // Initialize handshake state with device properties from channel allocation
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             let handshake_hash = get_handshake_hash(&device_properties_for_hash);
-            log::debug!("[BLE] Initial handshake hash: {} bytes", handshake_hash.len());
+            log::debug!(
+                "[BLE] Initial handshake hash: {} bytes",
+                handshake_hash.len()
+            );
             let mut creds = ThpHandshakeCredentials::default();
             creds.handshake_hash = handshake_hash.to_vec();
             device.protocol.state_mut().set_handshake_credentials(creds);
@@ -472,7 +529,9 @@ impl BluetoothTransport {
 
         let completion_req = {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             handle_handshake_init(
                 device.protocol.state_mut(),
                 &init_response,
@@ -489,22 +548,33 @@ impl BluetoothTransport {
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state().send_bit()
         };
-        log::debug!("[BLE] Sending handshake completion request (send_bit={})...", send_bit);
+        log::debug!(
+            "[BLE] Sending handshake completion request (send_bit={})...",
+            send_bit
+        );
         let comp_req = encode_handshake_completion_request(
             &channel,
             &completion_req.encrypted_host_static_pubkey,
             &completion_req.encrypted_payload,
             send_bit,
         );
-        log::debug!("[BLE] Completion request control byte: 0x{:02x}", comp_req[0]);
+        log::debug!(
+            "[BLE] Completion request control byte: 0x{:02x}",
+            comp_req[0]
+        );
         self.write_raw(path, &comp_req).await?;
 
         // Toggle send_bit after sending
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().update_sync_bit(true);
-            log::debug!("[BLE] Toggled send_bit to {}", device.protocol.state().send_bit());
+            log::debug!(
+                "[BLE] Toggled send_bit to {}",
+                device.protocol.state().send_bit()
+            );
         }
 
         // Read handshake completion response (skipping ACK)
@@ -517,7 +587,10 @@ impl BluetoothTransport {
 
         // Very long timeout - device may wait for user confirmation (2 minutes)
         let comp_resp = self.read_response(path, Duration::from_secs(120)).await?;
-        log::debug!("[BLE] Handshake completion response: {:02x?}", &comp_resp[..comp_resp.len().min(16)]);
+        log::debug!(
+            "[BLE] Handshake completion response: {:02x?}",
+            &comp_resp[..comp_resp.len().min(16)]
+        );
 
         if comp_resp.is_empty() {
             return Err(ThpError::HandshakeFailed("Empty completion response".to_string()).into());
@@ -539,7 +612,10 @@ impl BluetoothTransport {
 
             if comp_resp.len() >= 5 + payload_len && payload_len > crc_len {
                 let encrypted_payload = &comp_resp[5..5 + payload_len - crc_len];
-                log::debug!("[BLE] Encrypted completion payload: {} bytes", encrypted_payload.len());
+                log::debug!(
+                    "[BLE] Encrypted completion payload: {} bytes",
+                    encrypted_payload.len()
+                );
 
                 // Decrypt and parse the completion response
                 let completion = {
@@ -548,8 +624,14 @@ impl BluetoothTransport {
                     parse_handshake_completion_response(device.protocol.state(), encrypted_payload)?
                 };
 
-                log::info!("[BLE] Trezor state: {} (0=needs pairing, 1=paired)", completion.trezor_state);
-                log::info!("[BLE] Available pairing methods: {:?}", completion.pairing_methods);
+                log::info!(
+                    "[BLE] Trezor state: {} (0=needs pairing, 1=paired)",
+                    completion.trezor_state
+                );
+                log::info!(
+                    "[BLE] Available pairing methods: {:?}",
+                    completion.pairing_methods
+                );
 
                 if completion.trezor_state == 0 {
                     log::info!("[BLE] Device requires pairing - starting pairing flow");
@@ -577,52 +659,69 @@ impl BluetoothTransport {
                 } else {
                     // Reconnecting with stored credentials - still need to send ThpEndRequest
                     // to finalize the handshake before creating a session
-                    log::info!("[BLE] Reconnecting with stored credentials - sending ThpEndRequest...");
+                    log::info!(
+                        "[BLE] Reconnecting with stored credentials - sending ThpEndRequest..."
+                    );
 
                     // Mark as paired first so we can use encrypted messaging
                     {
                         let mut devices = self.devices.write().await;
-                        let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+                        let device = devices
+                            .get_mut(path)
+                            .ok_or(TransportError::DeviceNotFound)?;
                         device.protocol.state_mut().set_is_paired(true);
                     }
 
-                    let (end_resp_type, _) = self.send_encrypted_message(
-                        path,
-                        crate::constants::thp_message_type::THP_END_REQUEST,
-                        &[],
-                    ).await?;
+                    let (end_resp_type, _) = self
+                        .send_encrypted_message(
+                            path,
+                            crate::constants::thp_message_type::THP_END_REQUEST,
+                            &[],
+                        )
+                        .await?;
 
                     // state=1 may trigger a ButtonRequest for connection confirmation on the device
                     if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
                         log::info!("[BLE] Device requesting connection confirmation...");
-                        let (ack_resp_type, _) = self.send_encrypted_message(
-                            path,
-                            crate::constants::message_type::BUTTON_ACK,
-                            &[],
-                        ).await?;
+                        let (ack_resp_type, _) = self
+                            .send_encrypted_message(
+                                path,
+                                crate::constants::message_type::BUTTON_ACK,
+                                &[],
+                            )
+                            .await?;
                         if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
                             return Err(ThpError::PairingFailed(format!(
                                 "Expected ThpEndResponse after ButtonACK, got {}",
                                 ack_resp_type
-                            )).into());
+                            ))
+                            .into());
                         }
-                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
+                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE
+                    {
                         return Err(ThpError::PairingFailed(format!(
                             "Expected ThpEndResponse ({}), got {}",
-                            crate::constants::thp_message_type::THP_END_RESPONSE, end_resp_type
-                        )).into());
+                            crate::constants::thp_message_type::THP_END_RESPONSE,
+                            end_resp_type
+                        ))
+                        .into());
                     }
                     log::info!("[BLE] ThpEndRequest completed for reconnection");
                 }
             } else {
-                log::warn!("[BLE] Completion response too short to decrypt: {} bytes", comp_resp.len());
+                log::warn!(
+                    "[BLE] Completion response too short to decrypt: {} bytes",
+                    comp_resp.len()
+                );
             }
         }
 
         // Mark handshake as complete (enables encrypted messaging)
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().set_is_paired(true);
         }
 
@@ -647,9 +746,14 @@ impl BluetoothTransport {
         // The session_id is used in the encrypted message header
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             let session_id = device.protocol.state_mut().create_new_session_id();
-            log::debug!("[BLE] Created session ID {} for ThpCreateNewSession and future messages", session_id);
+            log::debug!(
+                "[BLE] Created session ID {} for ThpCreateNewSession and future messages",
+                session_id
+            );
         }
 
         // Bind the configured passphrase to the session. For on-device entry the
@@ -664,17 +768,20 @@ impl BluetoothTransport {
         };
         let session_payload = encode_create_new_session(passphrase_opt, self.session_on_device);
 
-        log::debug!("[BLE] Sending ThpCreateNewSession (type {}, {} bytes)",
-            THP_CREATE_NEW_SESSION, session_payload.len());
-
-        let (resp_type, resp_data) = self.send_encrypted_message(
-            path,
+        log::debug!(
+            "[BLE] Sending ThpCreateNewSession (type {}, {} bytes)",
             THP_CREATE_NEW_SESSION,
-            &session_payload,
-        ).await?;
+            session_payload.len()
+        );
+
+        let (resp_type, resp_data) = self
+            .send_encrypted_message(path, THP_CREATE_NEW_SESSION, &session_payload)
+            .await?;
 
         // Handle response - might need to handle ButtonRequest for passphrase on device
-        let (final_type, final_data) = self.handle_session_response(path, resp_type, resp_data).await?;
+        let (final_type, final_data) = self
+            .handle_session_response(path, resp_type, resp_data)
+            .await?;
 
         if final_type == crate::constants::message_type::SUCCESS {
             log::info!("[BLE] THP session created successfully!");
@@ -686,8 +793,10 @@ impl BluetoothTransport {
             Err(ThpError::SessionError(format!("ThpCreateNewSession rejected ({})", detail)).into())
         } else {
             Err(ThpError::SessionError(format!(
-                "Unexpected response to ThpCreateNewSession: type {}", final_type
-            )).into())
+                "Unexpected response to ThpCreateNewSession: type {}",
+                final_type
+            ))
+            .into())
         }
     }
 
@@ -698,18 +807,16 @@ impl BluetoothTransport {
         mut resp_type: u16,
         mut resp_data: Vec<u8>,
     ) -> Result<(u16, Vec<u8>)> {
-        use crate::constants::message_type::{BUTTON_REQUEST, BUTTON_ACK};
+        use crate::constants::message_type::{BUTTON_ACK, BUTTON_REQUEST};
 
         // Loop to handle ButtonRequests (e.g., for passphrase on device)
         while resp_type == BUTTON_REQUEST {
-            log::info!("[BLE] Received ButtonRequest during session creation - confirm on device if needed");
+            log::info!(
+                "[BLE] Received ButtonRequest during session creation - confirm on device if needed"
+            );
 
             // Send ButtonAck
-            let (next_type, next_data) = self.send_encrypted_message(
-                path,
-                BUTTON_ACK,
-                &[],
-            ).await?;
+            let (next_type, next_data) = self.send_encrypted_message(path, BUTTON_ACK, &[]).await?;
 
             resp_type = next_type;
             resp_data = next_data;
@@ -727,7 +834,9 @@ impl BluetoothTransport {
         rx_char: &btleplug::api::Characteristic,
         chunk: &[u8],
     ) -> Result<()> {
-        let count = device.write_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = device
+            .write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let write_type = if count < 8 || count % 16 == 0 {
             WriteType::WithResponse
         } else {
@@ -752,30 +861,41 @@ impl BluetoothTransport {
     /// packets with `[0x80, channel[0], channel[1], ...data...]` header.
     async fn write_raw(&self, path: &str, data: &[u8]) -> Result<()> {
         let devices = self.devices.read().await;
-        let device = devices
-            .get(path)
-            .ok_or(TransportError::DeviceNotFound)?;
+        let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
 
         let characteristics = device.peripheral.characteristics();
         let rx_char = characteristics
             .iter()
             .find(|c| c.uuid == BLE_CHARACTERISTIC_RX)
-            .ok_or_else(|| TransportError::DataTransfer("RX characteristic not found".to_string()))?;
+            .ok_or_else(|| {
+                TransportError::DataTransfer("RX characteristic not found".to_string())
+            })?;
 
         if data.len() <= BLE_CHUNK_SIZE {
             // Single chunk - pad to BLE_CHUNK_SIZE
             let mut padded_data = vec![0u8; BLE_CHUNK_SIZE];
             padded_data[..data.len()].copy_from_slice(data);
 
-            log::debug!("[BLE] Writing {} bytes (padded to {})",
-                data.len(), padded_data.len());
+            log::debug!(
+                "[BLE] Writing {} bytes (padded to {})",
+                data.len(),
+                padded_data.len()
+            );
 
             Self::write_chunk_ble(device, rx_char, &padded_data).await?;
         } else {
             // Multi-chunk: extract channel from first chunk bytes [1..3]
-            let channel = if data.len() >= 3 { [data[1], data[2]] } else { [0, 0] };
+            let channel = if data.len() >= 3 {
+                [data[1], data[2]]
+            } else {
+                [0, 0]
+            };
 
-            log::debug!("[BLE] Multi-chunk write: {} bytes total, chunk_size={}", data.len(), BLE_CHUNK_SIZE);
+            log::debug!(
+                "[BLE] Multi-chunk write: {} bytes total, chunk_size={}",
+                data.len(),
+                BLE_CHUNK_SIZE
+            );
 
             // First chunk: first BLE_CHUNK_SIZE bytes, padded
             let first_end = BLE_CHUNK_SIZE.min(data.len());
@@ -799,8 +919,11 @@ impl BluetoothTransport {
                 cont_chunk[cont_header_len..cont_header_len + payload_len]
                     .copy_from_slice(&data[offset..end]);
 
-                log::debug!("[BLE] Writing continuation chunk: {} bytes payload at offset {}",
-                    payload_len, offset);
+                log::debug!(
+                    "[BLE] Writing continuation chunk: {} bytes payload at offset {}",
+                    payload_len,
+                    offset
+                );
 
                 Self::write_chunk_ble(device, rx_char, &cont_chunk).await?;
                 offset = end;
@@ -815,9 +938,7 @@ impl BluetoothTransport {
     async fn read_with_timeout(&self, path: &str, timeout: Duration) -> Result<Vec<u8>> {
         let rx = {
             let devices = self.devices.read().await;
-            let device = devices
-                .get(path)
-                .ok_or(TransportError::DeviceNotFound)?;
+            let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
             device.rx.clone()
         };
 
@@ -828,7 +949,9 @@ impl BluetoothTransport {
                 log::trace!("[BLE] Read {} bytes from channel", data.len());
                 Ok(data)
             }
-            Ok(None) => Err(TransportError::DataTransfer("Notification channel closed".to_string()).into()),
+            Ok(None) => {
+                Err(TransportError::DataTransfer("Notification channel closed".to_string()).into())
+            }
             Err(_) => Err(TransportError::DataTransfer("Read timeout".to_string()).into()),
         }
     }
@@ -863,7 +986,8 @@ impl BluetoothTransport {
             return Err(ThpError::DecryptionError(format!(
                 "CRC32 mismatch: expected {:02x?}, got {:02x?}",
                 computed_crc, received_crc
-            )).into());
+            ))
+            .into());
         }
         Ok(())
     }
@@ -882,7 +1006,8 @@ impl BluetoothTransport {
             return Err(ThpError::DecryptionError(format!(
                 "Channel mismatch: expected {:02x?}, got {:02x?}",
                 expected_channel, msg_channel
-            )).into());
+            ))
+            .into());
         }
         Ok(())
     }
@@ -905,8 +1030,12 @@ impl BluetoothTransport {
             let ctrl_byte = data.get(0).copied().unwrap_or(0);
             let ctrl_type = ctrl_byte & 0xe7;
 
-            log::debug!("[BLE] << Received: ctrl=0x{:02x} (type=0x{:02x}), {} bytes",
-                ctrl_byte, ctrl_type, data.len());
+            log::debug!(
+                "[BLE] << Received: ctrl=0x{:02x} (type=0x{:02x}), {} bytes",
+                ctrl_byte,
+                ctrl_type,
+                data.len()
+            );
 
             // Validate CRC32 on the received message
             Self::validate_crc(&data)?;
@@ -954,15 +1083,24 @@ impl BluetoothTransport {
             (channel, message)
         };
 
-        log::debug!("[BLE] Sending encrypted message type {} ({} bytes)", message_type, message.len());
+        log::debug!(
+            "[BLE] Sending encrypted message type {} ({} bytes)",
+            message_type,
+            message.len()
+        );
         self.write_raw(path, &message).await?;
 
         // Toggle send_bit and increment send_nonce after sending
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().update_sync_bit(true);
-            device.protocol.state_mut().update_nonce(true)
+            device
+                .protocol
+                .state_mut()
+                .update_nonce(true)
                 .map_err(|e| ThpError::EncryptionError(e.to_string()))?;
         }
 
@@ -980,8 +1118,10 @@ impl BluetoothTransport {
             if response.len() < 5 {
                 return Err(ThpError::DecryptionError(format!(
                     "Response too short: {} bytes, raw: {:02x?}",
-                    response.len(), response
-                )).into());
+                    response.len(),
+                    response
+                ))
+                .into());
             }
 
             // Extract encrypted payload length from response header
@@ -989,8 +1129,11 @@ impl BluetoothTransport {
             let crc_len = 4;
             let header_len = 5; // ctrl(1) + channel(2) + length(2)
 
-            log::debug!("[BLE] Response payload_len={}, first chunk has {} bytes",
-                payload_len, response.len());
+            log::debug!(
+                "[BLE] Response payload_len={}, first chunk has {} bytes",
+                payload_len,
+                response.len()
+            );
 
             // Calculate how much data we have and need
             let first_chunk_payload = response.len().saturating_sub(header_len);
@@ -1002,7 +1145,11 @@ impl BluetoothTransport {
 
             // Read continuation packets if needed
             if first_chunk_payload < total_needed {
-                log::debug!("[BLE] Need more data: have {}, need {}", first_chunk_payload, total_needed);
+                log::debug!(
+                    "[BLE] Need more data: have {}, need {}",
+                    first_chunk_payload,
+                    total_needed
+                );
 
                 while full_payload.len() < total_needed {
                     // Read next chunk
@@ -1011,7 +1158,10 @@ impl BluetoothTransport {
 
                     // Check if it's a continuation packet (0x80 or 0x80 | sync_bit)
                     if (cont_ctrl & 0xe7) != thp_control::CONTINUATION_PACKET {
-                        log::warn!("[BLE] Expected continuation packet, got ctrl=0x{:02x}", cont_ctrl);
+                        log::warn!(
+                            "[BLE] Expected continuation packet, got ctrl=0x{:02x}",
+                            cont_ctrl
+                        );
                         break;
                     }
 
@@ -1019,16 +1169,21 @@ impl BluetoothTransport {
                     let cont_header_len = 3;
                     if cont.len() > cont_header_len {
                         full_payload.extend_from_slice(&cont[cont_header_len..]);
-                        log::debug!("[BLE] Read continuation: {} bytes, total now {} bytes",
-                            cont.len() - cont_header_len, full_payload.len());
+                        log::debug!(
+                            "[BLE] Read continuation: {} bytes, total now {} bytes",
+                            cont.len() - cont_header_len,
+                            full_payload.len()
+                        );
                     }
                 }
 
                 if full_payload.len() < total_needed {
                     return Err(ThpError::DecryptionError(format!(
                         "Incomplete payload: have {}, need {}",
-                        full_payload.len(), total_needed
-                    )).into());
+                        full_payload.len(),
+                        total_needed
+                    ))
+                    .into());
                 }
             }
 
@@ -1036,8 +1191,10 @@ impl BluetoothTransport {
             if payload_len <= crc_len || full_payload.len() < payload_len {
                 return Err(ThpError::DecryptionError(format!(
                     "Invalid payload: payload_len={}, full_payload.len()={}",
-                    payload_len, full_payload.len()
-                )).into());
+                    payload_len,
+                    full_payload.len()
+                ))
+                .into());
             }
 
             // Get protocol state for decryption
@@ -1045,34 +1202,51 @@ impl BluetoothTransport {
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
 
             // Decrypt using trezor_key
-            let creds = device.protocol.state().handshake_credentials()
+            let creds = device
+                .protocol
+                .state()
+                .handshake_credentials()
                 .ok_or(ThpError::StateMissing)?;
 
-            let key: [u8; 32] = creds.trezor_key.clone().try_into()
+            let key: [u8; 32] = creds
+                .trezor_key
+                .clone()
+                .try_into()
                 .map_err(|_| ThpError::DecryptionError("Invalid key".to_string()))?;
 
             // Extract the encrypted payload (without CRC) from full_payload
             let encrypted_payload = &full_payload[..payload_len - crc_len];
 
             let recv_nonce = device.protocol.state().recv_nonce();
-            log::debug!("[BLE] Decrypting with recv_nonce={}, encrypted_payload={} bytes", recv_nonce, encrypted_payload.len());
+            log::debug!(
+                "[BLE] Decrypting with recv_nonce={}, encrypted_payload={} bytes",
+                recv_nonce,
+                encrypted_payload.len()
+            );
             let iv = crate::protocol::thp::crypto::get_iv_from_nonce(recv_nonce);
             // THP uses empty AAD for post-handshake encrypted messages
             let aad: &[u8] = &[];
 
-            let decrypted = crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, aad, encrypted_payload)?;
+            let decrypted =
+                crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, aad, encrypted_payload)?;
 
             log::debug!("[BLE] Decrypted {} bytes", decrypted.len());
 
             // THP encrypted payload format: [session_id: 1 byte][message_type: 2 bytes][protobuf_data]
             if decrypted.len() < 3 {
-                return Err(ThpError::DecryptionError("Decrypted payload too short".to_string()).into());
+                return Err(
+                    ThpError::DecryptionError("Decrypted payload too short".to_string()).into(),
+                );
             }
 
             let session_id = decrypted[0];
             let msg_type = u16::from_be_bytes([decrypted[1], decrypted[2]]);
             let msg_data = decrypted[3..].to_vec();
-            log::debug!("[BLE] Session ID: {}, Message type: {}", session_id, msg_type);
+            log::debug!(
+                "[BLE] Session ID: {}, Message type: {}",
+                session_id,
+                msg_type
+            );
 
             (msg_type, msg_data)
         };
@@ -1080,21 +1254,34 @@ impl BluetoothTransport {
         // Update recv_bit and recv_nonce after successful decryption
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state_mut().update_sync_bit(false);
-            device.protocol.state_mut().update_nonce(false)
+            device
+                .protocol
+                .state_mut()
+                .update_nonce(false)
                 .map_err(|e| ThpError::DecryptionError(e.to_string()))?;
         }
 
-        log::debug!("[BLE] Received encrypted response type {} ({} bytes)", resp_type, resp_data.len());
+        log::debug!(
+            "[BLE] Received encrypted response type {} ({} bytes)",
+            resp_type,
+            resp_data.len()
+        );
         Ok((resp_type, resp_data))
     }
 
     /// Perform the pairing flow
-    pub async fn perform_pairing(&self, path: &str, code_callback: impl Fn() -> String) -> Result<()> {
+    pub async fn perform_pairing(
+        &self,
+        path: &str,
+        code_callback: impl Fn() -> String,
+    ) -> Result<()> {
         use crate::constants::{message_type, thp_message_type, thp_pairing_method};
-        use crate::protocol::thp::pairing_messages::*;
         use crate::protocol::thp::pairing::{get_cpace_host_keys, get_shared_secret};
+        use crate::protocol::thp::pairing_messages::*;
 
         log::info!("[BLE] Starting pairing flow...");
 
@@ -1102,11 +1289,13 @@ impl BluetoothTransport {
         let pairing_request = encode_pairing_request(&self.host_name, &self.app_name);
         log::info!("[BLE] Sending pairing request...");
 
-        let (mut resp_type, _) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_PAIRING_REQUEST,
-            &pairing_request,
-        ).await?;
+        let (mut resp_type, _) = self
+            .send_encrypted_message(
+                path,
+                thp_message_type::THP_PAIRING_REQUEST,
+                &pairing_request,
+            )
+            .await?;
 
         // Handle ButtonRequest - user needs to confirm on device
         if resp_type == message_type::BUTTON_REQUEST {
@@ -1115,19 +1304,23 @@ impl BluetoothTransport {
             log::info!("[BLE] ============================================================");
 
             // Send ButtonAck
-            let (next_type, _) = self.send_encrypted_message(
-                path,
-                message_type::BUTTON_ACK,
-                &[], // Empty payload for ButtonAck
-            ).await?;
+            let (next_type, _) = self
+                .send_encrypted_message(
+                    path,
+                    message_type::BUTTON_ACK,
+                    &[], // Empty payload for ButtonAck
+                )
+                .await?;
             resp_type = next_type;
         }
 
         if resp_type != thp_message_type::THP_PAIRING_REQUEST_APPROVED {
             return Err(ThpError::PairingFailed(format!(
                 "Expected ThpPairingRequestApproved ({}), got {}",
-                thp_message_type::THP_PAIRING_REQUEST_APPROVED, resp_type
-            )).into());
+                thp_message_type::THP_PAIRING_REQUEST_APPROVED,
+                resp_type
+            ))
+            .into());
         }
         log::info!("[BLE] Pairing request approved by user!");
 
@@ -1135,11 +1328,9 @@ impl BluetoothTransport {
         let select_method = encode_select_method(thp_pairing_method::CODE_ENTRY);
         log::info!("[BLE] Selecting code entry pairing method...");
 
-        let (resp_type, commitment_data) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_SELECT_METHOD,
-            &select_method,
-        ).await?;
+        let (resp_type, commitment_data) = self
+            .send_encrypted_message(path, thp_message_type::THP_SELECT_METHOD, &select_method)
+            .await?;
 
         // Generate a single challenge to use throughout the pairing flow
         let challenge: [u8; 32] = rand::random();
@@ -1151,17 +1342,21 @@ impl BluetoothTransport {
 
             // Send challenge and wait for ThpCodeEntryCommitment
             log::info!("[BLE] Sending code entry challenge...");
-            let (resp_type, commitment_data) = self.send_encrypted_message(
-                path,
-                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-                &challenge_payload,
-            ).await?;
+            let (resp_type, commitment_data) = self
+                .send_encrypted_message(
+                    path,
+                    thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                    &challenge_payload,
+                )
+                .await?;
 
             if resp_type != thp_message_type::THP_CODE_ENTRY_COMMITMENT {
                 return Err(ThpError::PairingFailed(format!(
                     "Expected ThpCodeEntryCommitment ({}), got {}",
-                    thp_message_type::THP_CODE_ENTRY_COMMITMENT, resp_type
-                )).into());
+                    thp_message_type::THP_CODE_ENTRY_COMMITMENT,
+                    resp_type
+                ))
+                .into());
             }
             commitment_data
         } else if resp_type == thp_message_type::THP_CODE_ENTRY_COMMITMENT {
@@ -1182,7 +1377,9 @@ impl BluetoothTransport {
         // Store commitment and challenge in handshake credentials for later validation
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             if let Some(creds) = device.protocol.state_mut().handshake_credentials_mut() {
                 creds.handshake_commitment = commitment.clone();
                 creds.code_entry_challenge = challenge.to_vec();
@@ -1192,17 +1389,21 @@ impl BluetoothTransport {
         // Step 3: Send the same challenge again to get CPACE Trezor pubkey
         // (must use the same challenge the commitment was generated against)
         log::info!("[BLE] Sending code entry challenge...");
-        let (resp_type, cpace_data) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-            &challenge_payload,
-        ).await?;
+        let (resp_type, cpace_data) = self
+            .send_encrypted_message(
+                path,
+                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                &challenge_payload,
+            )
+            .await?;
 
         if resp_type != thp_message_type::THP_CODE_ENTRY_CPACE_TREZOR {
             return Err(ThpError::PairingFailed(format!(
                 "Expected ThpCodeEntryCpaceTrezor ({}), got {}",
-                thp_message_type::THP_CODE_ENTRY_CPACE_TREZOR, resp_type
-            )).into());
+                thp_message_type::THP_CODE_ENTRY_CPACE_TREZOR,
+                resp_type
+            ))
+            .into());
         }
         let trezor_cpace_pubkey = decode_cpace_trezor(&cpace_data)?;
 
@@ -1220,47 +1421,65 @@ impl BluetoothTransport {
         let handshake_hash = {
             let devices = self.devices.read().await;
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
-            device.protocol.state().handshake_credentials()
+            device
+                .protocol
+                .state()
+                .handshake_credentials()
                 .map(|c| c.handshake_hash.clone())
                 .unwrap_or_default()
         };
 
         log::debug!("[BLE] CPACE: code len = {}", code.len());
         log::debug!("[BLE] CPACE: handshake_hash len = {}", handshake_hash.len());
-        log::debug!("[BLE] CPACE: trezor_cpace_pubkey len = {}", trezor_cpace_pubkey.len());
+        log::debug!(
+            "[BLE] CPACE: trezor_cpace_pubkey len = {}",
+            trezor_cpace_pubkey.len()
+        );
 
         let cpace_keys = get_cpace_host_keys(code.as_bytes(), &handshake_hash);
         log::debug!("[BLE] CPACE: host_pubkey generated (32 bytes)");
 
         // Compute shared secret and tag
         // The tag is the FULL 32-byte SHA-256 of the shared secret, not truncated
-        let shared_secret = Zeroizing::new(get_shared_secret(&trezor_cpace_pubkey, &cpace_keys.private_key));
-        log::debug!("[BLE] CPACE: shared_secret derived ({} bytes)", shared_secret.len());
+        let shared_secret = Zeroizing::new(get_shared_secret(
+            &trezor_cpace_pubkey,
+            &cpace_keys.private_key,
+        ));
+        log::debug!(
+            "[BLE] CPACE: shared_secret derived ({} bytes)",
+            shared_secret.len()
+        );
         let tag = &shared_secret[..]; // Full 32 bytes as tag
 
         // Step 6: Send ThpCodeEntryCpaceHostTag
         let cpace_host_tag = encode_cpace_host_tag(&cpace_keys.public_key, tag);
         log::info!("[BLE] Sending CPACE host tag...");
 
-        let (resp_type, secret_data) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
-            &cpace_host_tag,
-        ).await?;
+        let (resp_type, secret_data) = self
+            .send_encrypted_message(
+                path,
+                thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
+                &cpace_host_tag,
+            )
+            .await?;
 
         if resp_type == message_type::FAILURE {
             // Parse failure message for better error reporting
             let error_msg = parse_failure_message(&secret_data);
             return Err(ThpError::PairingFailed(format!(
-                "Code verification failed: {}", error_msg
-            )).into());
+                "Code verification failed: {}",
+                error_msg
+            ))
+            .into());
         }
 
         if resp_type != thp_message_type::THP_CODE_ENTRY_SECRET {
             return Err(ThpError::PairingFailed(format!(
                 "Expected ThpCodeEntrySecret ({}), got {}",
-                thp_message_type::THP_CODE_ENTRY_SECRET, resp_type
-            )).into());
+                thp_message_type::THP_CODE_ENTRY_SECRET,
+                resp_type
+            ))
+            .into());
         }
 
         let secret = decode_code_entry_secret(&secret_data)?;
@@ -1272,11 +1491,7 @@ impl BluetoothTransport {
             let devices = self.devices.read().await;
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
             if let Some(creds) = device.protocol.state().handshake_credentials() {
-                crate::protocol::thp::pairing::validate_code_entry_tag(
-                    creds,
-                    &code,
-                    &secret,
-                )?;
+                crate::protocol::thp::pairing::validate_code_entry_tag(creds, &code, &secret)?;
                 log::info!("[BLE] Code entry tag validated successfully!");
             } else {
                 return Err(ThpError::StateMissing.into());
@@ -1287,7 +1502,10 @@ impl BluetoothTransport {
         let host_static_pubkey = {
             let devices = self.devices.read().await;
             let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
-            device.protocol.state().handshake_credentials()
+            device
+                .protocol
+                .state()
+                .handshake_credentials()
                 .map(|c| c.host_static_public_key.clone())
                 .unwrap_or_default()
         };
@@ -1295,21 +1513,21 @@ impl BluetoothTransport {
         let credential_request = encode_credential_request(&host_static_pubkey, false, None);
         log::info!("[BLE] Sending credential request...");
 
-        let (resp_type, credential_data) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_CREDENTIAL_REQUEST,
-            &credential_request,
-        ).await?;
+        let (resp_type, credential_data) = self
+            .send_encrypted_message(
+                path,
+                thp_message_type::THP_CREDENTIAL_REQUEST,
+                &credential_request,
+            )
+            .await?;
 
         // Handle ButtonRequest if device needs confirmation
         let (resp_type, credential_data) = if resp_type == message_type::BUTTON_REQUEST {
             log::info!("[BLE] Device requesting confirmation for credential...");
             // Send ButtonAck
-            let (next_type, next_data) = self.send_encrypted_message(
-                path,
-                message_type::BUTTON_ACK,
-                &[],
-            ).await?;
+            let (next_type, next_data) = self
+                .send_encrypted_message(path, message_type::BUTTON_ACK, &[])
+                .await?;
             (next_type, next_data)
         } else {
             (resp_type, credential_data)
@@ -1319,15 +1537,19 @@ impl BluetoothTransport {
         if resp_type == message_type::FAILURE {
             let error_msg = parse_failure_message(&credential_data);
             return Err(ThpError::PairingFailed(format!(
-                "Credential request failed: {}", error_msg
-            )).into());
+                "Credential request failed: {}",
+                error_msg
+            ))
+            .into());
         }
 
         if resp_type != thp_message_type::THP_CREDENTIAL_RESPONSE {
             return Err(ThpError::PairingFailed(format!(
                 "Expected ThpCredentialResponse ({}), got {}",
-                thp_message_type::THP_CREDENTIAL_RESPONSE, resp_type
-            )).into());
+                thp_message_type::THP_CREDENTIAL_RESPONSE,
+                resp_type
+            ))
+            .into());
         }
 
         let (trezor_pubkey, credential) = decode_credential_response(&credential_data)?;
@@ -1338,9 +1560,14 @@ impl BluetoothTransport {
         // Store credentials for future reconnection (skip pairing next time)
         {
             let mut devices = self.devices.write().await;
-            let device = devices.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get_mut(path)
+                .ok_or(TransportError::DeviceNotFound)?;
             // Get the host static private key from handshake credentials
-            let host_static_private_key = device.protocol.state().handshake_credentials()
+            let host_static_private_key = device
+                .protocol
+                .state()
+                .handshake_credentials()
                 .map(|c| c.static_key.clone())
                 .unwrap_or_default();
             let stored_creds = crate::protocol::thp::state::ThpCredentials {
@@ -1349,23 +1576,26 @@ impl BluetoothTransport {
                 credential: hex::encode(&credential),
                 autoconnect: false,
             };
-            device.protocol.state_mut().add_pairing_credentials(stored_creds);
+            device
+                .protocol
+                .state_mut()
+                .add_pairing_credentials(stored_creds);
             log::info!("[BLE] Stored pairing credentials for future reconnection");
         }
 
         // Step 8: Send ThpEndRequest to finalize pairing
         log::info!("[BLE] Sending ThpEndRequest to finalize pairing...");
-        let (end_resp_type, _end_data) = self.send_encrypted_message(
-            path,
-            thp_message_type::THP_END_REQUEST,
-            &[],
-        ).await?;
+        let (end_resp_type, _end_data) = self
+            .send_encrypted_message(path, thp_message_type::THP_END_REQUEST, &[])
+            .await?;
 
         if end_resp_type != thp_message_type::THP_END_RESPONSE {
             return Err(ThpError::PairingFailed(format!(
                 "Expected ThpEndResponse ({}), got {}",
-                thp_message_type::THP_END_RESPONSE, end_resp_type
-            )).into());
+                thp_message_type::THP_END_RESPONSE,
+                end_resp_type
+            ))
+            .into());
         }
 
         log::info!("[BLE] Received ThpEndResponse - pairing finalized!");
@@ -1483,7 +1713,8 @@ impl TransportApi for BluetoothTransport {
         // Also subscribe to push notification characteristic (8c000004)
         if let Some(push_char) = characteristics
             .iter()
-            .find(|c| c.uuid == crate::constants::BLE_CHARACTERISTIC_PUSH) {
+            .find(|c| c.uuid == crate::constants::BLE_CHARACTERISTIC_PUSH)
+        {
             if let Err(e) = peripheral.subscribe(push_char).await {
                 log::warn!("[BLE] Failed to subscribe to PUSH notifications: {}", e);
             } else {
@@ -1548,14 +1779,17 @@ impl TransportApi for BluetoothTransport {
 
         // Store device with its own THP protocol state
         let mut devices = self.devices.write().await;
-        devices.insert(path.to_string(), ConnectedDevice {
-            peripheral,
-            handshake_complete: false,
-            protocol: ProtocolThp::new(),
-            rx: Arc::new(Mutex::new(rx)),
-            shutdown_tx,
-            write_count: std::sync::atomic::AtomicU32::new(0),
-        });
+        devices.insert(
+            path.to_string(),
+            ConnectedDevice {
+                peripheral,
+                handshake_complete: false,
+                protocol: ProtocolThp::new(),
+                rx: Arc::new(Mutex::new(rx)),
+                shutdown_tx,
+                write_count: std::sync::atomic::AtomicU32::new(0),
+            },
+        );
 
         Ok(())
     }
@@ -1580,33 +1814,30 @@ impl TransportApi for BluetoothTransport {
     async fn read(&self, path: &str) -> Result<Vec<u8>> {
         let rx = {
             let devices = self.devices.read().await;
-            let device = devices
-                .get(path)
-                .ok_or(TransportError::DeviceNotFound)?;
+            let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
             device.rx.clone()
         };
 
         let mut rx_guard = rx.lock().await;
 
         // Wait for next notification from channel
-        rx_guard
-            .recv()
-            .await
-            .ok_or_else(|| TransportError::DataTransfer("Notification channel closed".to_string()).into())
+        rx_guard.recv().await.ok_or_else(|| {
+            TransportError::DataTransfer("Notification channel closed".to_string()).into()
+        })
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
         let devices = self.devices.read().await;
-        let device = devices
-            .get(path)
-            .ok_or(TransportError::DeviceNotFound)?;
+        let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
 
         // Find RX characteristic
         let characteristics = device.peripheral.characteristics();
         let rx_char = characteristics
             .iter()
             .find(|c| c.uuid == BLE_CHARACTERISTIC_RX)
-            .ok_or_else(|| TransportError::DataTransfer("RX characteristic not found".to_string()))?;
+            .ok_or_else(|| {
+                TransportError::DataTransfer("RX characteristic not found".to_string())
+            })?;
 
         // Write data
         device
@@ -1642,7 +1873,10 @@ impl Transport for BluetoothTransport {
                 self.open(path).await?;
                 true
             } else {
-                !devices.get(path).map(|d| d.handshake_complete).unwrap_or(false)
+                !devices
+                    .get(path)
+                    .map(|d| d.handshake_complete)
+                    .unwrap_or(false)
             }
         };
 
@@ -1675,12 +1909,7 @@ impl Transport for BluetoothTransport {
             .map_err(|e| TransportError::DataTransfer(e.to_string()).into())
     }
 
-    async fn call(
-        &self,
-        session: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+    async fn call(&self, session: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)> {
         let path = self
             .sessions
             .get_path(session)
@@ -1693,21 +1922,31 @@ impl Transport for BluetoothTransport {
         // Check if THP handshake is complete - if so, use encrypted messaging
         let is_paired = {
             let devices = self.devices.read().await;
-            let device = devices.get(path.as_str()).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get(path.as_str())
+                .ok_or(TransportError::DeviceNotFound)?;
             device.protocol.state().is_paired()
         };
 
         if is_paired {
             // Use THP encrypted messaging
-            log::debug!("[BLE] Using THP encrypted call for message type {}", message_type);
+            log::debug!(
+                "[BLE] Using THP encrypted call for message type {}",
+                message_type
+            );
             self.send_encrypted_message(&path, message_type, data).await
         } else {
             // Fall back to unencrypted messaging (for pre-handshake)
-            log::debug!("[BLE] Using unencrypted call for message type {}", message_type);
+            log::debug!(
+                "[BLE] Using unencrypted call for message type {}",
+                message_type
+            );
 
             let (_encoded, chunks) = {
                 let devices = self.devices.read().await;
-                let device = devices.get(path.as_str()).ok_or(TransportError::DeviceNotFound)?;
+                let device = devices
+                    .get(path.as_str())
+                    .ok_or(TransportError::DeviceNotFound)?;
                 let encoded = device.protocol.encode(message_type, data)?;
                 let (_, chunk_header) = device.protocol.get_headers(&encoded);
                 let chunks = chunk::create_chunks(&encoded, &chunk_header, BLE_CHUNK_SIZE);
@@ -1722,7 +1961,9 @@ impl Transport for BluetoothTransport {
             // Read response
             let first_chunk = self.read(&path).await?;
             let devices = self.devices.read().await;
-            let device = devices.get(path.as_str()).ok_or(TransportError::DeviceNotFound)?;
+            let device = devices
+                .get(path.as_str())
+                .ok_or(TransportError::DeviceNotFound)?;
             let decoded = device.protocol.decode(&first_chunk)?;
 
             Ok((decoded.message_type, decoded.payload))

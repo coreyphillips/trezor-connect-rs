@@ -209,7 +209,9 @@ pub fn decode_credential_response(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     }
 
     if trezor_pubkey.is_empty() || credential.is_empty() {
-        return Err(ThpError::PairingFailed("Missing credential response fields".to_string()).into());
+        return Err(
+            ThpError::PairingFailed("Missing credential response fields".to_string()).into(),
+        );
     }
 
     Ok((trezor_pubkey, credential))

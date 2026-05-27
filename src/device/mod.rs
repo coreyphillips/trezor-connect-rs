@@ -2,10 +2,10 @@
 //!
 //! Provides a high-level interface for interacting with Trezor devices.
 
-mod trezor;
-mod features;
 mod commands;
+mod features;
+mod trezor;
 
-pub use trezor::*;
-pub use features::*;
 pub use commands::*;
+pub use features::*;
+pub use trezor::*;

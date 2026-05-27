@@ -5,8 +5,8 @@
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use trezor_connect_rs::{TrezorClient, UsbTransport, Result, TrezorUiCallback, PassphraseResponse};
 use trezor_connect_rs::transport::Transport;
+use trezor_connect_rs::{PassphraseResponse, Result, TrezorClient, TrezorUiCallback, UsbTransport};
 
 /// UI callback that prompts for PIN and passphrase via stdin.
 struct StdinUiCallback;
@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
     // Initialize device and get features
     println!("\nSending Initialize message...");
     let features = client.initialize().await?;
-    println!("\nConnected to: {} ({})",
+    println!(
+        "\nConnected to: {} ({})",
         features.label.as_deref().unwrap_or_default(),
         features.model.as_deref().unwrap_or_default()
     );

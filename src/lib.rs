@@ -89,23 +89,23 @@
 //! ```
 
 // Core modules
+pub mod api;
+pub mod compose;
 pub mod constants;
+pub mod device;
 pub mod error;
 pub mod protocol;
 pub mod protos;
 pub mod transport;
-pub mod device;
-pub mod api;
 pub mod types;
-pub mod compose;
 
 // High-level API modules
-pub mod trezor;
 pub mod connected_device;
+pub mod credential_store;
 pub mod device_info;
 pub mod params;
 pub mod responses;
-pub mod credential_store;
+pub mod trezor;
 
 // UI callback for PIN/passphrase input
 pub mod ui_callback;
@@ -121,22 +121,22 @@ pub mod session_state;
 pub mod psbt;
 
 // Re-export error types
-pub use error::{TrezorError, Result};
+pub use error::{Result, TrezorError};
 
 // Re-export high-level API (primary interface)
-pub use trezor::{Trezor, TrezorBuilder, PairingCallback};
 pub use connected_device::ConnectedDevice;
+pub use credential_store::{CredentialStore, StoredCredential};
 pub use device_info::{DeviceInfo, TransportType};
 pub use params::*;
 pub use responses::*;
-pub use credential_store::{CredentialStore, StoredCredential};
-pub use ui_callback::{TrezorUiCallback, PassphraseResponse};
+pub use trezor::{PairingCallback, Trezor, TrezorBuilder};
+pub use ui_callback::{PassphraseResponse, TrezorUiCallback};
 
 // Re-export low-level API for advanced users
 pub use device::TrezorClient;
+pub use transport::Transport;
 pub use types::bitcoin::*;
 pub use types::network::*;
-pub use transport::Transport;
 
 // Re-export transport types based on features
 #[cfg(feature = "usb")]
@@ -147,6 +147,6 @@ pub use transport::bluetooth::BluetoothTransport;
 
 // Re-export callback transport (always available)
 pub use transport::callback::{
-    CallbackTransport, TransportCallback, CallbackDeviceInfo, CallbackResult, CallbackReadResult,
-    CallbackMessageResult,
+    CallbackDeviceInfo, CallbackMessageResult, CallbackReadResult, CallbackResult,
+    CallbackTransport, TransportCallback,
 };
