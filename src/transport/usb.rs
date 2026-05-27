@@ -19,6 +19,7 @@ use crate::constants::{
     thp_control,
 };
 use crate::error::{Result, TransportError, ThpError};
+use zeroize::Zeroizing;
 use crate::protocol::v1::ProtocolV1;
 use crate::protocol::thp::{
     ProtocolThp, encode_channel_allocation_request, encode_handshake_init_request,
@@ -73,6 +74,14 @@ pub struct UsbTransport {
     thp_states: Arc<RwLock<HashMap<String, ThpDeviceState>>>,
     /// Pairing code callback for THP pairing
     pairing_callback: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    /// Passphrase bound to the THP session at `ThpCreateNewSession` time.
+    /// Empty string opens the standard wallet. Ignored when `session_on_device`
+    /// is true (the device prompts on its own screen). NFKD-normalized and
+    /// wiped from memory on drop.
+    session_passphrase: Zeroizing<String>,
+    /// When true, the THP session is created with `on_device = true` so the
+    /// user enters the passphrase on the Trezor instead of the host.
+    session_on_device: bool,
 }
 
 impl UsbTransport {
@@ -85,12 +94,31 @@ impl UsbTransport {
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             thp_states: Arc::new(RwLock::new(HashMap::new())),
             pairing_callback: None,
+            session_passphrase: Zeroizing::new(String::new()),
+            session_on_device: false,
         })
     }
 
     /// Set the pairing code callback for THP devices.
     pub fn set_pairing_callback(&mut self, callback: Arc<dyn Fn() -> String + Send + Sync>) {
         self.pairing_callback = Some(callback);
+    }
+
+    /// Set the passphrase bound to the THP session created during acquire.
+    ///
+    /// `passphrase` opens the corresponding hidden wallet (empty = standard).
+    /// When `on_device` is true the passphrase is entered on the Trezor itself
+    /// and `passphrase` is ignored. The passphrase is NFKD-normalized (matching
+    /// `@trezor/connect`) and wiped from memory on drop. Must be called before
+    /// the THP session is created.
+    pub fn with_session_passphrase(mut self, passphrase: String, on_device: bool) -> Self {
+        // Own the caller's `String` in `Zeroizing` immediately so their
+        // handed-over copy is wiped on drop, not just the normalized one we keep.
+        let passphrase = Zeroizing::new(passphrase);
+        self.session_passphrase =
+            Zeroizing::new(crate::passphrase::normalize_passphrase(&passphrase));
+        self.session_on_device = on_device;
+        self
     }
 
     /// Get or create the per-device call serialization lock.
@@ -791,28 +819,47 @@ impl UsbTransport {
             }
         }
 
-        let session_payload = encode_create_new_session(Some(""), false);
+        // Bind the configured passphrase to the session. For on-device entry the
+        // passphrase field is omitted (firmware rejects empty-passphrase +
+        // on_device); the Trezor then prompts on its own screen. Otherwise an
+        // empty passphrase opens the standard wallet and a non-empty one a hidden
+        // wallet.
+        let passphrase_opt = if self.session_on_device {
+            None
+        } else {
+            Some(self.session_passphrase.as_str())
+        };
+        let session_payload = encode_create_new_session(passphrase_opt, self.session_on_device);
 
-        let (resp_type, resp_data) = self.send_thp_encrypted(
+        let (mut resp_type, mut resp_data) = self.send_thp_encrypted(
             path, channel,
             crate::constants::thp_message_type::THP_CREATE_NEW_SESSION,
             &session_payload,
         ).await?;
 
-        let (final_type, _) = if resp_type == crate::constants::message_type::BUTTON_REQUEST {
-            self.send_thp_encrypted(
+        // The device may emit one or more ButtonRequests before completing —
+        // e.g. confirming the passphrase, or showing its on-device keyboard.
+        // Acknowledge each until the device returns the final Success/Failure.
+        while resp_type == crate::constants::message_type::BUTTON_REQUEST {
+            log::debug!("[USB-THP] ThpCreateNewSession: ButtonRequest, acking");
+            let (next_type, next_data) = self.send_thp_encrypted(
                 path, channel,
                 crate::constants::message_type::BUTTON_ACK, &[],
-            ).await?
-        } else {
-            (resp_type, resp_data)
-        };
+            ).await?;
+            resp_type = next_type;
+            resp_data = next_data;
+        }
 
-        if final_type == 2 { // Success
+        if resp_type == crate::constants::message_type::SUCCESS {
             log::info!("[USB-THP] THP session created successfully!");
             Ok(())
+        } else if resp_type == crate::constants::message_type::FAILURE {
+            // Decode the device's reason so the failure is actionable.
+            let detail = crate::transport::decode_failure_detail(&resp_data);
+            log::warn!("[USB-THP] ThpCreateNewSession rejected: {}", detail);
+            Err(ThpError::SessionError(format!("ThpCreateNewSession rejected ({})", detail)).into())
         } else {
-            Err(ThpError::SessionError(format!("Unexpected response: {}", final_type)).into())
+            Err(ThpError::SessionError(format!("Unexpected response: {}", resp_type)).into())
         }
     }
 

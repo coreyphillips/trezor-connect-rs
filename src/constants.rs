@@ -130,6 +130,8 @@ pub mod message_type {
     pub const BUTTON_REQUEST: u16 = 26;
     /// ButtonAck - host acknowledges button request
     pub const BUTTON_ACK: u16 = 27;
+    /// Success - device reports a successful operation
+    pub const SUCCESS: u16 = 2;
     /// Failure - device reports an error
     pub const FAILURE: u16 = 3;
     /// Features - device capabilities/info

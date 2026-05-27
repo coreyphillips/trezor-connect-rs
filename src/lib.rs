@@ -110,6 +110,12 @@ pub mod credential_store;
 // UI callback for PIN/passphrase input
 pub mod ui_callback;
 
+// BIP39 passphrase normalization (NFKD), matching `@trezor/connect`
+pub(crate) mod passphrase;
+
+// Static session id derivation + wrong-passphrase detection
+pub mod session_state;
+
 // PSBT support (optional, requires `psbt` feature)
 #[cfg(feature = "psbt")]
 pub mod psbt;

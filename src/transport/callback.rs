@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use zeroize::Zeroizing;
 
 use crate::constants::{PROTOCOL_V1_HEADER_SIZE, thp_control};
 use crate::error::{Result, TransportError, ThpError};
@@ -249,7 +250,10 @@ pub struct CallbackTransport {
     /// Passphrase bound to the THP session at `ThpCreateNewSession` time.
     /// Empty string opens the standard wallet. Ignored when
     /// `session_on_device` is true (the device prompts on its own screen).
-    session_passphrase: String,
+    ///
+    /// Wrapped in `Zeroizing` so the passphrase buffer is wiped from memory when
+    /// the transport is dropped, rather than lingering for the process lifetime.
+    session_passphrase: Zeroizing<String>,
     /// When true, the THP session is created with `on_device = true` so the
     /// user enters the passphrase on the Trezor instead of the host.
     session_on_device: bool,
@@ -269,7 +273,7 @@ impl CallbackTransport {
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_passphrase: String::new(),
+            session_passphrase: Zeroizing::new(String::new()),
             session_on_device: false,
         }
     }
@@ -287,7 +291,7 @@ impl CallbackTransport {
             app_name: "trezor-connect-rs".to_string(),
             transport_type_cache: Arc::new(RwLock::new(HashMap::new())),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            session_passphrase: String::new(),
+            session_passphrase: Zeroizing::new(String::new()),
             session_on_device: false,
         }
     }
@@ -297,8 +301,14 @@ impl CallbackTransport {
     /// `passphrase` opens the corresponding hidden wallet (empty = standard).
     /// When `on_device` is true the passphrase is entered on the Trezor itself
     /// and `passphrase` is ignored. Must be called before `acquire()`.
+    ///
+    /// The passphrase is NFKD-normalized (matching `@trezor/connect`) and held
+    /// in `Zeroizing` for the transport's lifetime, wiped from memory on drop.
     pub fn with_session_passphrase(mut self, passphrase: String, on_device: bool) -> Self {
-        self.session_passphrase = passphrase;
+        // Own the caller's `String` in `Zeroizing` immediately so their
+        // handed-over copy is wiped on drop, not just the normalized one we keep.
+        let passphrase = Zeroizing::new(passphrase);
+        self.session_passphrase = Zeroizing::new(crate::passphrase::normalize_passphrase(&passphrase));
         self.session_on_device = on_device;
         self
     }
@@ -1509,18 +1519,12 @@ impl CallbackTransport {
             resp_data = next_data;
         }
 
-        const SUCCESS_MESSAGE_TYPE: u16 = 2;
-        const FAILURE_MESSAGE_TYPE: u16 = 3;
-        if resp_type == SUCCESS_MESSAGE_TYPE {
+        if resp_type == crate::constants::message_type::SUCCESS {
             log::info!("[Callback] THP session created successfully!");
             Ok(())
-        } else if resp_type == FAILURE_MESSAGE_TYPE {
+        } else if resp_type == crate::constants::message_type::FAILURE {
             // Decode the device's reason so the failure is actionable.
-            let detail = <crate::protos::common::Failure as prost::Message>::decode(
-                resp_data.as_slice(),
-            )
-            .map(|f| format!("code={:?}, message={}", f.code, f.message()))
-            .unwrap_or_else(|_| "undecodable Failure".to_string());
+            let detail = crate::transport::decode_failure_detail(&resp_data);
             log::warn!("[Callback] ThpCreateNewSession rejected: {}", detail);
             Err(ThpError::SessionError(format!("ThpCreateNewSession rejected ({})", detail)).into())
         } else {

@@ -173,6 +173,64 @@ impl ConnectedDevice {
         })
     }
 
+    /// Derive this wallet's static session id — a stable fingerprint of the
+    /// active seed + passphrase.
+    ///
+    /// Asks the device for its first testnet receive address
+    /// (`m/44'/1'/0'/0/0`, P2PKH, not shown on screen) and combines it with the
+    /// device id into the trezor-suite format `<address>@<deviceId>:0`. The
+    /// address changes whenever the passphrase changes, so two ids can be
+    /// compared to tell whether the same passphrase was used. See
+    /// [`crate::session_state`].
+    ///
+    /// Call [`initialize`](Self::initialize) first so `device_id` is populated.
+    /// If features are unavailable the device-id component is empty, which makes
+    /// the id unparseable and therefore uncomparable —
+    /// [`verify_session_state`](Self::verify_session_state) will then report no
+    /// mismatch.
+    pub async fn get_static_session_id(&self) -> Result<String> {
+        let device_id = self
+            .features
+            .as_ref()
+            .and_then(|f| f.device_id.clone())
+            .unwrap_or_default();
+
+        let address = self
+            .get_address(GetAddressParams {
+                path: "m/44'/1'/0'/0/0".to_string(),
+                coin: Some(crate::types::network::Network::Testnet),
+                show_on_trezor: false,
+                script_type: Some(ScriptType::SpendAddress),
+                multisig: None,
+            })
+            .await?;
+
+        Ok(crate::session_state::build_static_session_id(
+            &address.address,
+            &device_id,
+            0,
+        ))
+    }
+
+    /// Verify the active passphrase against a previously remembered wallet.
+    ///
+    /// Derives the current [static session id](Self::get_static_session_id) and,
+    /// when `expected` is provided, compares it (ignoring the instance suffix).
+    /// Returns [`DeviceError::InvalidState`] if they identify different wallets —
+    /// i.e. the entered passphrase differs from the one that created `expected`.
+    /// Pass `None` on first use to simply obtain the id to persist.
+    ///
+    /// Returns the freshly derived static session id on success.
+    pub async fn verify_session_state(&self, expected: Option<&str>) -> Result<String> {
+        let current = self.get_static_session_id().await?;
+        if let Some(expected) = expected {
+            if crate::session_state::is_unexpected_state(expected, &current) {
+                return Err(DeviceError::InvalidState.into());
+            }
+        }
+        Ok(current)
+    }
+
     /// Get a public key (xpub).
     ///
     /// # Example
@@ -1078,7 +1136,9 @@ impl ConnectedDevice {
                             }
                             crate::ui_callback::PassphraseResponse::Hidden { value } => {
                                 protos::PassphraseAck {
-                                    passphrase: Some(value),
+                                    passphrase: Some(crate::passphrase::normalize_passphrase(
+                                        &value,
+                                    )),
                                     state: None,
                                     on_device: None,
                                 }
