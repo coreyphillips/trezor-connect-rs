@@ -32,16 +32,16 @@ trezor-connect-rs = "0.3.0"
 
 ```toml
 # Default: USB + Bluetooth
-trezor-connect-rs = "0.2"
+trezor-connect-rs = "0.3"
 
 # USB only (e.g., for iOS where libusb isn't available)
-trezor-connect-rs = { version = "0.2", default-features = false, features = ["usb"] }
+trezor-connect-rs = { version = "0.3", default-features = false, features = ["usb"] }
 
 # Bluetooth only
-trezor-connect-rs = { version = "0.2", default-features = false, features = ["bluetooth"] }
+trezor-connect-rs = { version = "0.3", default-features = false, features = ["bluetooth"] }
 
 # With OS keychain for credential storage
-trezor-connect-rs = { version = "0.2", features = ["os-keychain"] }
+trezor-connect-rs = { version = "0.3", features = ["os-keychain"] }
 ```
 
 ## Quick Start
@@ -160,6 +160,60 @@ let address = client.get_address("m/84'/0'/0'/0/0", false).await?;
 
 client.release().await?;
 ```
+
+## Passphrases & Hidden Wallets
+
+A passphrase opens a separate *hidden* wallet on top of the device seed; an empty
+passphrase opens the standard wallet. Host-entered passphrases are normalized to
+Unicode **NFKD** before being sent (matching `@trezor/connect`), so accented or
+non-Latin passphrases derive the same wallet here as in Trezor Suite.
+
+**How the passphrase is bound depends on the device:**
+
+- **Legacy (v1) devices** prompt mid-operation. Provide a
+  [`TrezorUiCallback`](src/ui_callback.rs) via `Trezor::new().with_ui_callback(...)`
+  and return a `PassphraseResponse` (`Standard`, `Hidden { value }`, `OnDevice`,
+  or `Cancel`) from `on_passphrase_request`.
+- **THP devices (Safe 5 / Safe 7)** bind the passphrase when the session is
+  created, not via a mid-operation prompt. Construct the transport directly and
+  call `with_session_passphrase(passphrase, on_device)` before acquiring:
+
+  ```rust
+  let mut transport = CallbackTransport::new(adapter)
+      .with_session_passphrase("my secret".to_string(), /* on_device = */ false);
+  transport.init().await?;
+  let session = transport.acquire(&path, None).await?;
+  ```
+
+  Pass `on_device = true` to have the user type the passphrase on the Trezor
+  itself (the `passphrase` argument is then ignored). Note: the high-level
+  `Trezor` manager shares one transport across connections and does **not** bind
+  per-connection passphrases for THP — use the transport directly for hidden THP
+  wallets, as the `hidden_passphrase` example does.
+
+### Detecting a wrong passphrase
+
+The host never sees the seed, so it can't tell from the passphrase string whether
+the user re-typed the *same* passphrase as before — a typo silently opens a
+different wallet. Use the **static session id** (a stable fingerprint of the
+active seed + passphrase) to detect this:
+
+```rust
+// First time: derive and persist the id for this wallet.
+let saved = device.get_static_session_id().await?;
+
+// Later connections: compare against the saved id.
+match device.verify_session_state(Some(&saved)).await {
+    Ok(current) => { /* same wallet; `current == saved` */ }
+    Err(TrezorError::Device(DeviceError::InvalidState)) => {
+        // A different passphrase was entered.
+    }
+    Err(e) => return Err(e),
+}
+```
+
+This is opt-in: call it yourself and persist the expected id. See
+[`session_state`](src/session_state.rs) for the format and comparison rules.
 
 ## Credential Storage
 

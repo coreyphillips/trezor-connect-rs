@@ -139,7 +139,9 @@ impl<T: Transport> TrezorClient<T> {
                             }
                             crate::ui_callback::PassphraseResponse::Hidden { value } => {
                                 protos::PassphraseAck {
-                                    passphrase: Some(value),
+                                    passphrase: Some(crate::passphrase::normalize_passphrase(
+                                        &value,
+                                    )),
                                     state: None,
                                     on_device: None,
                                 }

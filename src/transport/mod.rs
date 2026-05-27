@@ -16,3 +16,16 @@ pub mod bluetooth;
 pub use traits::*;
 pub use session::*;
 pub use callback::*;
+
+/// Decode a Trezor `Failure` protobuf payload into a human-readable
+/// `code=…, message=…` string for logging and error context.
+///
+/// Shared by the USB, Bluetooth, and Callback transports so a rejected
+/// `ThpCreateNewSession` is reported identically regardless of transport.
+/// Falls back to a marker string if the bytes don't decode as a `Failure`.
+pub(crate) fn decode_failure_detail(data: &[u8]) -> String {
+    use prost::Message;
+    crate::protos::common::Failure::decode(data)
+        .map(|f| format!("code={:?}, message={}", f.code, f.message()))
+        .unwrap_or_else(|_| "undecodable Failure".to_string())
+}

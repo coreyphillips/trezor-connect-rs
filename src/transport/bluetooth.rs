@@ -109,6 +109,14 @@ pub struct BluetoothTransport {
     /// Per-device call serialization locks (path -> mutex).
     /// Ensures only one call() is in-flight per device at a time.
     call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Passphrase bound to the THP session at `ThpCreateNewSession` time.
+    /// Empty string opens the standard wallet. Ignored when `session_on_device`
+    /// is true (the device prompts on its own screen). NFKD-normalized and
+    /// wiped from memory on drop.
+    session_passphrase: Zeroizing<String>,
+    /// When true, the THP session is created with `on_device = true` so the
+    /// user enters the passphrase on the Trezor instead of the host.
+    session_on_device: bool,
 }
 
 impl BluetoothTransport {
@@ -133,7 +141,26 @@ impl BluetoothTransport {
             host_name: "trezor-connect-rs".to_string(),
             app_name: "trezor-connect-rs".to_string(),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_passphrase: Zeroizing::new(String::new()),
+            session_on_device: false,
         })
+    }
+
+    /// Set the passphrase bound to the THP session created during connect.
+    ///
+    /// `passphrase` opens the corresponding hidden wallet (empty = standard).
+    /// When `on_device` is true the passphrase is entered on the Trezor itself
+    /// and `passphrase` is ignored. The passphrase is NFKD-normalized (matching
+    /// `@trezor/connect`) and wiped from memory on drop. Must be called before
+    /// the THP session is created.
+    pub fn with_session_passphrase(mut self, passphrase: String, on_device: bool) -> Self {
+        // Own the caller's `String` in `Zeroizing` immediately so their
+        // handed-over copy is wiped on drop, not just the normalized one we keep.
+        let passphrase = Zeroizing::new(passphrase);
+        self.session_passphrase =
+            Zeroizing::new(crate::passphrase::normalize_passphrase(&passphrase));
+        self.session_on_device = on_device;
+        self
     }
 
     /// Get or create the per-device call serialization lock.
@@ -625,9 +652,17 @@ impl BluetoothTransport {
             log::debug!("[BLE] Created session ID {} for ThpCreateNewSession and future messages", session_id);
         }
 
-        // Send empty passphrase - device without passphrase protection expects this
-        // If device has passphrase protection, it will prompt separately
-        let session_payload = encode_create_new_session(Some(""), false);
+        // Bind the configured passphrase to the session. For on-device entry the
+        // passphrase field is omitted (firmware rejects empty-passphrase +
+        // on_device); the Trezor then prompts on its own screen. Otherwise an
+        // empty passphrase opens the standard wallet and a non-empty one a hidden
+        // wallet.
+        let passphrase_opt = if self.session_on_device {
+            None
+        } else {
+            Some(self.session_passphrase.as_str())
+        };
+        let session_payload = encode_create_new_session(passphrase_opt, self.session_on_device);
 
         log::debug!("[BLE] Sending ThpCreateNewSession (type {}, {} bytes)",
             THP_CREATE_NEW_SESSION, session_payload.len());
@@ -641,14 +676,14 @@ impl BluetoothTransport {
         // Handle response - might need to handle ButtonRequest for passphrase on device
         let (final_type, final_data) = self.handle_session_response(path, resp_type, resp_data).await?;
 
-        // Check for Success (type 2)
-        const SUCCESS_MESSAGE_TYPE: u16 = 2;
-        if final_type == SUCCESS_MESSAGE_TYPE {
+        if final_type == crate::constants::message_type::SUCCESS {
             log::info!("[BLE] THP session created successfully!");
             Ok(())
         } else if final_type == crate::constants::message_type::FAILURE {
-            let error_msg = parse_failure_message(&final_data);
-            Err(ThpError::SessionError(format!("Failed to create session: {}", error_msg)).into())
+            // Decode the device's reason so the failure is actionable.
+            let detail = crate::transport::decode_failure_detail(&final_data);
+            log::warn!("[BLE] ThpCreateNewSession rejected: {}", detail);
+            Err(ThpError::SessionError(format!("ThpCreateNewSession rejected ({})", detail)).into())
         } else {
             Err(ThpError::SessionError(format!(
                 "Unexpected response to ThpCreateNewSession: type {}", final_type

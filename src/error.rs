@@ -9,6 +9,7 @@ pub type Result<T> = std::result::Result<T, TrezorError>;
 
 /// Main error type for Trezor operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum TrezorError {
     /// Transport layer error (USB/Bluetooth communication)
     #[error("Transport error: {0}")]
@@ -49,6 +50,7 @@ pub enum TrezorError {
 
 /// Transport layer errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum TransportError {
     /// No Trezor device found
     #[error("No Trezor device found")]
@@ -91,6 +93,7 @@ pub enum TransportError {
 
 /// Protocol layer errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ProtocolError {
     /// Malformed message
     #[error("Malformed message: {0}")]
@@ -127,6 +130,7 @@ pub enum ProtocolError {
 
 /// Device errors returned by the Trezor.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DeviceError {
     /// Device not connected or session not acquired
     #[error("Device not connected or session not acquired")]
@@ -155,6 +159,12 @@ pub enum DeviceError {
     /// Passphrase entry cancelled
     #[error("Passphrase entry cancelled")]
     PassphraseCancelled,
+
+    /// The device's derived session state did not match the expected state,
+    /// i.e. a different passphrase was entered than the one that created the
+    /// remembered wallet. Mirrors trezor-suite's `Device_InvalidState`.
+    #[error("Passphrase is incorrect (device state mismatch)")]
+    InvalidState,
 
     /// Device is not initialized
     #[error("Device is not initialized")]
@@ -195,6 +205,7 @@ pub enum DeviceError {
 
 /// THP (Trezor Host Protocol) specific errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ThpError {
     /// Channel allocation failed
     #[error("Channel allocation failed")]
@@ -243,6 +254,7 @@ pub enum ThpError {
 
 /// Session management errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SessionError {
     /// Session not found
     #[error("Session not found")]
@@ -263,6 +275,7 @@ pub enum SessionError {
 
 /// Bitcoin-specific errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BitcoinError {
     /// Invalid derivation path
     #[error("Invalid derivation path: {0}")]

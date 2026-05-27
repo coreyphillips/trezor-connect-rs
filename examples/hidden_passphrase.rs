@@ -195,6 +195,21 @@ async fn main() -> trezor_connect_rs::Result<()> {
          entry) to reach a different wallet."
     );
 
+    // --- Static session id (wrong-passphrase detection) ---
+    // A stable fingerprint of the active seed + passphrase. Persist it the first
+    // time you open a wallet; on later connections compare against it to catch a
+    // mistyped passphrase — which would otherwise silently open a *different*
+    // (usually empty) wallet. Changing the passphrase changes this value.
+    let session_id = device.get_static_session_id().await?;
+    println!("\n--- Static Session Id ---");
+    println!("{session_id}");
+    println!(
+        "Save this, then on the next connection call\n\
+         `device.verify_session_state(Some(&saved)).await?` — it returns the\n\
+         current id, or `Err(DeviceError::InvalidState)` if a different\n\
+         passphrase was entered."
+    );
+
     device.disconnect().await?;
     println!("\nDisconnected.");
     Ok(())
