@@ -126,7 +126,8 @@ pub fn chunks_needed(
     let continuation_payload_size = chunk_size - continuation_header_size;
 
     // Calculate continuation chunks needed (ceiling division)
-    let continuation_chunks = (remaining + continuation_payload_size - 1) / continuation_payload_size;
+    let continuation_chunks =
+        (remaining + continuation_payload_size - 1) / continuation_payload_size;
 
     1 + continuation_chunks
 }
@@ -230,7 +231,8 @@ mod tests {
         let chunk2 = vec![0x3F, 6, 7, 8, 9, 10, 0, 0];
 
         let chunks = vec![chunk1, chunk2];
-        let payload = reassemble_chunks(&chunks, header_size, continuation_header_size, 10).unwrap();
+        let payload =
+            reassemble_chunks(&chunks, header_size, continuation_header_size, 10).unwrap();
 
         assert_eq!(payload, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }

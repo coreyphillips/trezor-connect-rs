@@ -3,9 +3,9 @@
 //! Decodes messages from the THP protocol (v2).
 
 use super::crypto::*;
-use super::state::ThpState;
 use super::decode_control_byte;
-use crate::constants::{thp_control, THP_HEADER_SIZE, THP_MESSAGE_LEN_SIZE};
+use super::state::ThpState;
+use crate::constants::{THP_HEADER_SIZE, THP_MESSAGE_LEN_SIZE, thp_control};
 use crate::error::{ProtocolError, Result, ThpError};
 use crate::protocol::DecodedMessage;
 
@@ -59,10 +59,7 @@ pub fn decode_thp_message(buffer: &[u8]) -> Result<DecodedMessage> {
 }
 
 /// Decode and decrypt an encrypted THP message
-pub fn decode_encrypted_message(
-    state: &ThpState,
-    buffer: &[u8],
-) -> Result<(u16, Vec<u8>)> {
+pub fn decode_encrypted_message(state: &ThpState, buffer: &[u8]) -> Result<(u16, Vec<u8>)> {
     let decoded = decode_thp_message(buffer)?;
 
     // Get decryption key
@@ -70,7 +67,10 @@ pub fn decode_encrypted_message(
         .handshake_credentials()
         .ok_or(ThpError::StateMissing)?;
 
-    let key: [u8; 32] = creds.trezor_key.clone().try_into()
+    let key: [u8; 32] = creds
+        .trezor_key
+        .clone()
+        .try_into()
         .map_err(|_| ThpError::DecryptionError("Invalid key length".to_string()))?;
 
     let iv = get_iv_from_nonce(state.recv_nonce());
@@ -112,7 +112,9 @@ pub fn parse_channel_allocation_response(buffer: &[u8]) -> Result<[u8; 2]> {
 }
 
 /// Parse handshake init response
-pub fn parse_handshake_init_response(buffer: &[u8]) -> Result<super::handshake::HandshakeInitResponse> {
+pub fn parse_handshake_init_response(
+    buffer: &[u8],
+) -> Result<super::handshake::HandshakeInitResponse> {
     let decoded = decode_thp_message(buffer)?;
 
     if decoded.message_type != thp_control::HANDSHAKE_INIT_RES as u16 {
@@ -125,7 +127,10 @@ pub fn parse_handshake_init_response(buffer: &[u8]) -> Result<super::handshake::
 
     // Parse payload: trezor_ephemeral_pubkey (32) + encrypted_static_pubkey (48) + tag (16)
     if decoded.payload.len() < 96 {
-        return Err(ProtocolError::Malformed("HandshakeInitResponse payload too short".to_string()).into());
+        return Err(ProtocolError::Malformed(
+            "HandshakeInitResponse payload too short".to_string(),
+        )
+        .into());
     }
 
     let trezor_ephemeral_pubkey: [u8; 32] = decoded.payload[..32]
@@ -237,9 +242,7 @@ pub fn get_recv_sync_bit(buffer: &[u8]) -> Option<u8> {
 
     if matches!(
         data_type,
-        thp_control::HANDSHAKE_INIT_RES
-            | thp_control::HANDSHAKE_COMP_RES
-            | thp_control::ENCRYPTED
+        thp_control::HANDSHAKE_INIT_RES | thp_control::HANDSHAKE_COMP_RES | thp_control::ENCRYPTED
     ) {
         Some((control >> 4) & 0x01)
     } else {
@@ -258,7 +261,10 @@ mod tests {
         buffer.extend_from_slice(&[0x00, 0x00]); // Length
 
         let decoded = decode_thp_message(&buffer).unwrap();
-        assert_eq!(decoded.message_type, thp_control::CHANNEL_ALLOCATION_RES as u16);
+        assert_eq!(
+            decoded.message_type,
+            thp_control::CHANNEL_ALLOCATION_RES as u16
+        );
         assert_eq!(decoded.length, 0);
     }
 

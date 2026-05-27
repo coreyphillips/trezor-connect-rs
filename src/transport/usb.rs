@@ -14,23 +14,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::constants::{
-    USB_CHUNK_SIZE, USB_ENDPOINT_IN, USB_ENDPOINT_OUT, USB_INTERFACE_ID,
-    USB_PRODUCT_ID_BOOTLOADER, USB_PRODUCT_ID_FIRMWARE, USB_VENDOR_ID,
-    thp_control,
+    USB_CHUNK_SIZE, USB_ENDPOINT_IN, USB_ENDPOINT_OUT, USB_INTERFACE_ID, USB_PRODUCT_ID_BOOTLOADER,
+    USB_PRODUCT_ID_FIRMWARE, USB_VENDOR_ID, thp_control,
 };
-use crate::error::{Result, TransportError, ThpError};
-use zeroize::Zeroizing;
-use crate::protocol::v1::ProtocolV1;
+use crate::error::{Result, ThpError, TransportError};
 use crate::protocol::thp::{
-    ProtocolThp, encode_channel_allocation_request, encode_handshake_init_request,
-    encode_handshake_completion_request, encode_ack, encode_encrypted_message,
-    handle_handshake_init, HandshakeInitResponse, get_handshake_hash,
-    parse_handshake_completion_response,
-    state::ThpHandshakeCredentials,
-    pairing_messages::encode_create_new_session,
+    HandshakeInitResponse, ProtocolThp, encode_ack, encode_channel_allocation_request,
+    encode_encrypted_message, encode_handshake_completion_request, encode_handshake_init_request,
+    get_handshake_hash, handle_handshake_init, pairing_messages::encode_create_new_session,
+    parse_handshake_completion_response, state::ThpHandshakeCredentials,
 };
-use crate::protocol::{chunk, Protocol};
+use crate::protocol::v1::ProtocolV1;
+use crate::protocol::{Protocol, chunk};
 use crate::transport::{DeviceDescriptor, SessionManager, Transport, TransportApi};
+use zeroize::Zeroizing;
 
 /// Timeout for USB operations in milliseconds
 const USB_TIMEOUT_MS: u64 = 5000;
@@ -133,7 +130,10 @@ impl UsbTransport {
     /// Check if a device has negotiated THP.
     pub async fn has_thp(&self, path: &str) -> bool {
         let states = self.thp_states.read().await;
-        states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
+        states
+            .get(path)
+            .map(|s| s.handshake_complete)
+            .unwrap_or(false)
     }
 
     /// Find Trezor USB devices
@@ -179,7 +179,11 @@ impl UsbTransport {
             self.write(path, &padded).await
         } else {
             // Extract channel from first chunk bytes [1..3]
-            let channel = if data.len() >= 3 { [data[1], data[2]] } else { [0, 0] };
+            let channel = if data.len() >= 3 {
+                [data[1], data[2]]
+            } else {
+                [0, 0]
+            };
 
             // First chunk
             let mut first_chunk = vec![0u8; USB_CHUNK_SIZE];
@@ -208,21 +212,34 @@ impl UsbTransport {
 
     /// Check if a THP message is an ACK
     fn is_thp_ack(data: &[u8]) -> bool {
-        if data.is_empty() { return false; }
+        if data.is_empty() {
+            return false;
+        }
         (data[0] & 0xf7) == thp_control::ACK_MESSAGE
     }
 
     /// Read a THP response, skipping ACKs and reassembling continuation packets.
-    async fn read_thp_response(&self, path: &str, max_attempts: u32, expected_channel: Option<&[u8; 2]>) -> Result<Vec<u8>> {
+    async fn read_thp_response(
+        &self,
+        path: &str,
+        max_attempts: u32,
+        expected_channel: Option<&[u8; 2]>,
+    ) -> Result<Vec<u8>> {
         for _ in 0..max_attempts {
             let first_chunk = self.read(path).await?;
-            if first_chunk.is_empty() { continue; }
+            if first_chunk.is_empty() {
+                continue;
+            }
 
             let ctrl_byte = first_chunk[0];
             let ctrl_type = ctrl_byte & 0xe7;
 
-            log::debug!("[USB-THP] << Received: ctrl=0x{:02x} (type=0x{:02x}), len={}",
-                ctrl_byte, ctrl_type, first_chunk.len());
+            log::debug!(
+                "[USB-THP] << Received: ctrl=0x{:02x} (type=0x{:02x}), len={}",
+                ctrl_byte,
+                ctrl_type,
+                first_chunk.len()
+            );
 
             // Validate channel if provided
             if let Some(ch) = expected_channel {
@@ -230,8 +247,11 @@ impl UsbTransport {
                     && ctrl_byte != thp_control::CHANNEL_ALLOCATION_RES
                     && &first_chunk[1..3] != ch
                 {
-                    log::warn!("[USB-THP] Channel mismatch: expected {:02x?}, got {:02x?}",
-                        ch, &first_chunk[1..3]);
+                    log::warn!(
+                        "[USB-THP] Channel mismatch: expected {:02x?}, got {:02x?}",
+                        ch,
+                        &first_chunk[1..3]
+                    );
                     continue;
                 }
             }
@@ -251,7 +271,11 @@ impl UsbTransport {
                     0x05 => "DeviceLocked",
                     _ => "Unknown",
                 };
-                return Err(ThpError::HandshakeFailed(format!("THP Error: {} (0x{:02x})", error_name, error_code)).into());
+                return Err(ThpError::HandshakeFailed(format!(
+                    "THP Error: {} (0x{:02x})",
+                    error_name, error_code
+                ))
+                .into());
             }
 
             // Check if multi-chunk message
@@ -260,21 +284,31 @@ impl UsbTransport {
                 let total_needed = 5 + payload_len;
 
                 if total_needed > USB_CHUNK_SIZE {
-                    log::debug!("[USB-THP] Multi-chunk message: need {} bytes, have {}",
-                        total_needed, first_chunk.len());
+                    log::debug!(
+                        "[USB-THP] Multi-chunk message: need {} bytes, have {}",
+                        total_needed,
+                        first_chunk.len()
+                    );
 
                     let mut full_data = first_chunk.clone();
                     let mut bytes_remaining = total_needed - first_chunk.len();
 
                     while bytes_remaining > 0 {
                         let cont_chunk = self.read(path).await?;
-                        if cont_chunk.is_empty() { continue; }
+                        if cont_chunk.is_empty() {
+                            continue;
+                        }
 
-                        if Self::is_thp_ack(&cont_chunk) { continue; }
+                        if Self::is_thp_ack(&cont_chunk) {
+                            continue;
+                        }
 
                         // Continuation packet has 3-byte header (ctrl + channel)
                         if (cont_chunk[0] & 0x80) != 0x80 {
-                            log::warn!("[USB-THP] Expected continuation, got ctrl=0x{:02x}", cont_chunk[0]);
+                            log::warn!(
+                                "[USB-THP] Expected continuation, got ctrl=0x{:02x}",
+                                cont_chunk[0]
+                            );
                             break;
                         }
                         if cont_chunk.len() > 3 {
@@ -310,7 +344,9 @@ impl UsbTransport {
         // Read response — look for Protocol V1 header
         for _ in 0..20 {
             let chunk = self.read(path).await?;
-            if chunk.is_empty() { continue; }
+            if chunk.is_empty() {
+                continue;
+            }
 
             // Check for V1 header: 0x3F + 0x23 0x23
             if chunk.len() >= 3 && chunk[0] == 0x3F && chunk[1] == 0x23 && chunk[2] == 0x23 {
@@ -325,21 +361,33 @@ impl UsbTransport {
                     let available = chunk.len().saturating_sub(header_size);
                     let payload_len = (decoded.length as usize).min(available);
                     let raw_payload = &chunk[header_size..header_size + payload_len];
-                    let trimmed_len = raw_payload.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+                    let trimmed_len = raw_payload
+                        .iter()
+                        .rposition(|&b| b != 0)
+                        .map_or(0, |i| i + 1);
                     let payload = &raw_payload[..trimmed_len];
 
-                    if let Ok(failure) = <crate::protos::common::Failure as prost::Message>::decode(payload) {
+                    if let Ok(failure) =
+                        <crate::protos::common::Failure as prost::Message>::decode(payload)
+                    {
                         if failure.code == Some(FAILURE_INVALID_PROTOCOL) {
-                            log::info!("[USB] Device responded with Failure_InvalidProtocol — THP detected!");
+                            log::info!(
+                                "[USB] Device responded with Failure_InvalidProtocol — THP detected!"
+                            );
                             return Ok(true);
                         }
-                        log::debug!("[USB] Device responded with Failure code={:?}", failure.code);
+                        log::debug!(
+                            "[USB] Device responded with Failure code={:?}",
+                            failure.code
+                        );
                     }
                 }
 
                 // Any V1 response means device speaks V1
-                log::debug!("[USB] Device responded with V1 message type={}, using V1 protocol",
-                    decoded.message_type);
+                log::debug!(
+                    "[USB] Device responded with V1 message type={}, using V1 protocol",
+                    decoded.message_type
+                );
                 return Ok(false);
             }
 
@@ -350,7 +398,10 @@ impl UsbTransport {
                 || ctrl == thp_control::ERROR
                 || ctrl == thp_control::HANDSHAKE_INIT_RES
             {
-                log::info!("[USB] Device responded with THP control byte 0x{:02x} — THP detected!", chunk[0]);
+                log::info!(
+                    "[USB] Device responded with THP control byte 0x{:02x} — THP detected!",
+                    chunk[0]
+                );
                 return Ok(true);
             }
         }
@@ -366,25 +417,39 @@ impl UsbTransport {
 
         // Step 1: Channel Allocation
         let channel_req = encode_channel_allocation_request();
-        log::debug!("[USB-THP] Sending channel allocation request ({} bytes)", channel_req.len());
+        log::debug!(
+            "[USB-THP] Sending channel allocation request ({} bytes)",
+            channel_req.len()
+        );
         self.write_raw_thp(path, &channel_req).await?;
 
         let channel_resp = self.read_thp_response(path, 100, None).await?;
-        log::debug!("[USB-THP] Channel response: {:02x?}", &channel_resp[..channel_resp.len().min(16)]);
+        log::debug!(
+            "[USB-THP] Channel response: {:02x?}",
+            &channel_resp[..channel_resp.len().min(16)]
+        );
 
         if channel_resp.is_empty() || channel_resp[0] != thp_control::CHANNEL_ALLOCATION_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected channel allocation response, got: 0x{:02x}", channel_resp.first().unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected channel allocation response, got: 0x{:02x}",
+                channel_resp.first().unwrap_or(&0)
+            ))
+            .into());
         }
 
         if channel_resp.len() < 15 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Channel allocation response too short: {} bytes", channel_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Channel allocation response too short: {} bytes",
+                channel_resp.len()
+            ))
+            .into());
         }
         let channel: [u8; 2] = [channel_resp[13], channel_resp[14]];
-        log::info!("[USB-THP] Allocated channel: {:02x}{:02x}", channel[0], channel[1]);
+        log::info!(
+            "[USB-THP] Allocated channel: {:02x}{:02x}",
+            channel[0],
+            channel[1]
+        );
 
         // Extract device properties for handshake hash
         let payload_len = u16::from_be_bytes([channel_resp[3], channel_resp[4]]) as usize;
@@ -399,20 +464,26 @@ impl UsbTransport {
         // Create THP state
         {
             let mut states = self.thp_states.write().await;
-            let state = states.entry(path.to_string()).or_insert_with(|| ThpDeviceState {
-                protocol: ProtocolThp::new(),
-                handshake_complete: false,
-            });
+            let state = states
+                .entry(path.to_string())
+                .or_insert_with(|| ThpDeviceState {
+                    protocol: ProtocolThp::new(),
+                    handshake_complete: false,
+                });
             state.protocol.state_mut().set_channel(channel);
         }
 
         // Step 2: Handshake Init
         let ephemeral_secret: [u8; 32] = rand::random();
-        let (_, host_ephemeral_pubkey) = crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
+        let (_, host_ephemeral_pubkey) =
+            crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
 
         let send_bit = {
             let states = self.thp_states.read().await;
-            states.get(path).map(|s| s.protocol.state().send_bit()).unwrap_or(0)
+            states
+                .get(path)
+                .map(|s| s.protocol.state().send_bit())
+                .unwrap_or(0)
         };
 
         let init_req = encode_handshake_init_request(
@@ -433,12 +504,17 @@ impl UsbTransport {
         }
 
         let init_resp = self.read_thp_response(path, 100, Some(&channel)).await?;
-        log::debug!("[USB-THP] Handshake init response: {} bytes", init_resp.len());
+        log::debug!(
+            "[USB-THP] Handshake init response: {} bytes",
+            init_resp.len()
+        );
 
         if init_resp.is_empty() || (init_resp[0] & 0xe7) != thp_control::HANDSHAKE_INIT_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected handshake init response, got: 0x{:02x}", init_resp.first().unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected handshake init response, got: 0x{:02x}",
+                init_resp.first().unwrap_or(&0)
+            ))
+            .into());
         }
 
         // Send ACK
@@ -448,16 +524,20 @@ impl UsbTransport {
 
         // Parse handshake init response
         if init_resp.len() < 5 + 32 + 48 + 16 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Handshake init response too short: {} bytes", init_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Handshake init response too short: {} bytes",
+                init_resp.len()
+            ))
+            .into());
         }
 
         let payload = &init_resp[5..];
-        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32].try_into()
+        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid ephemeral pubkey".to_string()))?;
         let trezor_encrypted_static = payload[32..80].to_vec();
-        let tag: [u8; 16] = payload[80..96].try_into()
+        let tag: [u8; 16] = payload[80..96]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid tag".to_string()))?;
 
         // Initialize handshake state with hash
@@ -492,7 +572,10 @@ impl UsbTransport {
         // Step 3: Handshake Completion
         let send_bit = {
             let states = self.thp_states.read().await;
-            states.get(path).map(|s| s.protocol.state().send_bit()).unwrap_or(0)
+            states
+                .get(path)
+                .map(|s| s.protocol.state().send_bit())
+                .unwrap_or(0)
         };
 
         let comp_req = encode_handshake_completion_request(
@@ -511,7 +594,9 @@ impl UsbTransport {
             }
         }
 
-        log::info!("[USB-THP] Waiting for handshake completion (check Trezor screen if pairing needed)...");
+        log::info!(
+            "[USB-THP] Waiting for handshake completion (check Trezor screen if pairing needed)..."
+        );
         let comp_resp = self.read_thp_response(path, 600, Some(&channel)).await?;
 
         // Send ACK
@@ -533,8 +618,10 @@ impl UsbTransport {
                     parse_handshake_completion_response(state.protocol.state(), encrypted_payload)?
                 };
 
-                log::info!("[USB-THP] trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
-                    completion.trezor_state);
+                log::info!(
+                    "[USB-THP] trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
+                    completion.trezor_state
+                );
 
                 if completion.trezor_state == 0 {
                     // Device requires pairing
@@ -552,30 +639,39 @@ impl UsbTransport {
                         }
                     }
 
-                    let (end_resp_type, _) = self.send_thp_encrypted(
-                        path,
-                        &channel,
-                        crate::constants::thp_message_type::THP_END_REQUEST,
-                        &[],
-                    ).await?;
+                    let (end_resp_type, _) = self
+                        .send_thp_encrypted(
+                            path,
+                            &channel,
+                            crate::constants::thp_message_type::THP_END_REQUEST,
+                            &[],
+                        )
+                        .await?;
 
                     if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
                         log::info!("[USB-THP] Device requesting connection confirmation...");
-                        let (ack_resp_type, _) = self.send_thp_encrypted(
-                            path,
-                            &channel,
-                            crate::constants::message_type::BUTTON_ACK,
-                            &[],
-                        ).await?;
+                        let (ack_resp_type, _) = self
+                            .send_thp_encrypted(
+                                path,
+                                &channel,
+                                crate::constants::message_type::BUTTON_ACK,
+                                &[],
+                            )
+                            .await?;
                         if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
-                            return Err(ThpError::HandshakeFailed(
-                                format!("Expected ThpEndResponse after ButtonAck, got: {}", ack_resp_type)
-                            ).into());
+                            return Err(ThpError::HandshakeFailed(format!(
+                                "Expected ThpEndResponse after ButtonAck, got: {}",
+                                ack_resp_type
+                            ))
+                            .into());
                         }
-                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
-                        return Err(ThpError::HandshakeFailed(
-                            format!("Expected ThpEndResponse, got: {}", end_resp_type)
-                        ).into());
+                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE
+                    {
+                        return Err(ThpError::HandshakeFailed(format!(
+                            "Expected ThpEndResponse, got: {}",
+                            end_resp_type
+                        ))
+                        .into());
                     }
                 }
             }
@@ -608,8 +704,8 @@ impl UsbTransport {
     /// Mirrors the callback transport's pairing flow.
     async fn perform_thp_pairing(&self, path: &str, channel: &[u8; 2]) -> Result<()> {
         use crate::constants::{message_type, thp_message_type, thp_pairing_method};
-        use crate::protocol::thp::pairing_messages::*;
         use crate::protocol::thp::pairing::{get_cpace_host_keys, get_shared_secret};
+        use crate::protocol::thp::pairing_messages::*;
 
         log::info!("[USB-THP] Starting pairing flow...");
 
@@ -623,35 +719,37 @@ impl UsbTransport {
 
         // Step 1: Send ThpPairingRequest
         let pairing_request = encode_pairing_request("trezor-connect-rs", "trezor-connect-rs");
-        let (mut resp_type, _) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_PAIRING_REQUEST,
-            &pairing_request,
-        ).await?;
+        let (mut resp_type, _) = self
+            .send_thp_encrypted(
+                path,
+                channel,
+                thp_message_type::THP_PAIRING_REQUEST,
+                &pairing_request,
+            )
+            .await?;
 
         // Handle ButtonRequest
         if resp_type == message_type::BUTTON_REQUEST {
             log::info!("[USB-THP] >>> CONFIRM PAIRING ON YOUR TREZOR SCREEN! <<<");
-            let (next_type, _) = self.send_thp_encrypted(
-                path, channel,
-                message_type::BUTTON_ACK, &[],
-            ).await?;
+            let (next_type, _) = self
+                .send_thp_encrypted(path, channel, message_type::BUTTON_ACK, &[])
+                .await?;
             resp_type = next_type;
         }
 
         if resp_type != thp_message_type::THP_PAIRING_REQUEST_APPROVED {
-            return Err(ThpError::PairingFailed(
-                format!("Expected PairingRequestApproved, got: {}", resp_type)
-            ).into());
+            return Err(ThpError::PairingFailed(format!(
+                "Expected PairingRequestApproved, got: {}",
+                resp_type
+            ))
+            .into());
         }
 
         // Step 2: Select code entry method
         let select = encode_select_method(thp_pairing_method::CODE_ENTRY);
-        let (resp_type, commitment_data) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_SELECT_METHOD,
-            &select,
-        ).await?;
+        let (resp_type, commitment_data) = self
+            .send_thp_encrypted(path, channel, thp_message_type::THP_SELECT_METHOD, &select)
+            .await?;
 
         // Generate a single challenge to reuse throughout the pairing flow
         let challenge: [u8; 32] = rand::random();
@@ -659,11 +757,14 @@ impl UsbTransport {
 
         // Handle response flow (may get PairingPreparationsFinished or CodeEntryCommitment)
         let commitment_data = if resp_type == thp_message_type::THP_PAIRING_PREPARATIONS_FINISHED {
-            let (resp_type, commitment_data) = self.send_thp_encrypted(
-                path, channel,
-                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-                &challenge_payload,
-            ).await?;
+            let (resp_type, commitment_data) = self
+                .send_thp_encrypted(
+                    path,
+                    channel,
+                    thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                    &challenge_payload,
+                )
+                .await?;
             if resp_type != thp_message_type::THP_CODE_ENTRY_COMMITMENT {
                 return Err(ThpError::PairingFailed("Expected commitment".to_string()).into());
             }
@@ -671,7 +772,9 @@ impl UsbTransport {
         } else if resp_type == thp_message_type::THP_CODE_ENTRY_COMMITMENT {
             commitment_data
         } else {
-            return Err(ThpError::PairingFailed(format!("Unexpected response: {}", resp_type)).into());
+            return Err(
+                ThpError::PairingFailed(format!("Unexpected response: {}", resp_type)).into(),
+            );
         };
 
         // Decode and store commitment + challenge
@@ -687,16 +790,21 @@ impl UsbTransport {
         }
 
         // Step 3: Get CPACE Trezor pubkey (reuse the same challenge)
-        let (resp_type, cpace_data) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-            &challenge_payload,
-        ).await?;
+        let (resp_type, cpace_data) = self
+            .send_thp_encrypted(
+                path,
+                channel,
+                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                &challenge_payload,
+            )
+            .await?;
 
         if resp_type != thp_message_type::THP_CODE_ENTRY_CPACE_TREZOR {
-            return Err(ThpError::PairingFailed(
-                format!("Expected CpaceTrezor, got: {}", resp_type)
-            ).into());
+            return Err(ThpError::PairingFailed(format!(
+                "Expected CpaceTrezor, got: {}",
+                resp_type
+            ))
+            .into());
         }
         let trezor_cpace_pubkey = decode_cpace_trezor(&cpace_data)?;
 
@@ -708,8 +816,9 @@ impl UsbTransport {
             cb()
         } else {
             return Err(ThpError::PairingFailed(
-                "No pairing callback set — cannot enter code for USB THP pairing".to_string()
-            ).into());
+                "No pairing callback set — cannot enter code for USB THP pairing".to_string(),
+            )
+            .into());
         };
         if code.is_empty() {
             return Err(ThpError::PairingFailed("Pairing cancelled by user".to_string()).into());
@@ -720,7 +829,10 @@ impl UsbTransport {
         let handshake_hash = {
             let states = self.thp_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
-            state.protocol.state().handshake_credentials()
+            state
+                .protocol
+                .state()
+                .handshake_credentials()
                 .map(|c| c.handshake_hash.clone())
                 .unwrap_or_default()
         };
@@ -730,17 +842,22 @@ impl UsbTransport {
         let tag = &shared_secret[..];
 
         let cpace_host_tag = encode_cpace_host_tag(&cpace_keys.public_key, tag);
-        let (resp_type, secret_data) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
-            &cpace_host_tag,
-        ).await?;
+        let (resp_type, secret_data) = self
+            .send_thp_encrypted(
+                path,
+                channel,
+                thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
+                &cpace_host_tag,
+            )
+            .await?;
 
         if resp_type == message_type::FAILURE {
             return Err(ThpError::PairingFailed("Code verification failed".to_string()).into());
         }
         if resp_type != thp_message_type::THP_CODE_ENTRY_SECRET {
-            return Err(ThpError::PairingFailed(format!("Expected secret, got {}", resp_type)).into());
+            return Err(
+                ThpError::PairingFailed(format!("Expected secret, got {}", resp_type)).into(),
+            );
         }
 
         // Validate the code entry tag
@@ -749,9 +866,7 @@ impl UsbTransport {
             let states = self.thp_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
             if let Some(creds) = state.protocol.state().handshake_credentials() {
-                crate::protocol::thp::pairing::validate_code_entry_tag(
-                    creds, &code, &secret,
-                )?;
+                crate::protocol::thp::pairing::validate_code_entry_tag(creds, &code, &secret)?;
                 log::info!("[USB-THP] Code entry tag validated!");
             } else {
                 return Err(ThpError::StateMissing.into());
@@ -761,46 +876,54 @@ impl UsbTransport {
         // Step 7: Request credential
         let host_static_pubkey = {
             let states = self.thp_states.read().await;
-            states.get(path)
+            states
+                .get(path)
                 .and_then(|s| s.protocol.state().handshake_credentials())
                 .map(|c| c.host_static_public_key.clone())
                 .unwrap_or_default()
         };
 
         let credential_request = encode_credential_request(&host_static_pubkey, false, None);
-        let (mut resp_type, mut credential_data) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_CREDENTIAL_REQUEST,
-            &credential_request,
-        ).await?;
+        let (mut resp_type, mut credential_data) = self
+            .send_thp_encrypted(
+                path,
+                channel,
+                thp_message_type::THP_CREDENTIAL_REQUEST,
+                &credential_request,
+            )
+            .await?;
 
         if resp_type == message_type::BUTTON_REQUEST {
-            let (next_type, next_data) = self.send_thp_encrypted(
-                path, channel,
-                message_type::BUTTON_ACK, &[],
-            ).await?;
+            let (next_type, next_data) = self
+                .send_thp_encrypted(path, channel, message_type::BUTTON_ACK, &[])
+                .await?;
             resp_type = next_type;
             credential_data = next_data;
         }
 
         if resp_type != thp_message_type::THP_CREDENTIAL_RESPONSE {
-            return Err(ThpError::PairingFailed(
-                format!("Expected CredentialResponse, got: {}", resp_type)
-            ).into());
+            return Err(ThpError::PairingFailed(format!(
+                "Expected CredentialResponse, got: {}",
+                resp_type
+            ))
+            .into());
         }
-        log::info!("[USB-THP] Received pairing credential ({} bytes)", credential_data.len());
+        log::info!(
+            "[USB-THP] Received pairing credential ({} bytes)",
+            credential_data.len()
+        );
 
         // Step 8: Send ThpEndRequest
-        let (end_type, _) = self.send_thp_encrypted(
-            path, channel,
-            thp_message_type::THP_END_REQUEST,
-            &[],
-        ).await?;
+        let (end_type, _) = self
+            .send_thp_encrypted(path, channel, thp_message_type::THP_END_REQUEST, &[])
+            .await?;
 
         if end_type != thp_message_type::THP_END_RESPONSE {
-            return Err(ThpError::PairingFailed(
-                format!("Expected ThpEndResponse, got: {}", end_type)
-            ).into());
+            return Err(ThpError::PairingFailed(format!(
+                "Expected ThpEndResponse, got: {}",
+                end_type
+            ))
+            .into());
         }
 
         log::info!("[USB-THP] Pairing complete!");
@@ -831,21 +954,28 @@ impl UsbTransport {
         };
         let session_payload = encode_create_new_session(passphrase_opt, self.session_on_device);
 
-        let (mut resp_type, mut resp_data) = self.send_thp_encrypted(
-            path, channel,
-            crate::constants::thp_message_type::THP_CREATE_NEW_SESSION,
-            &session_payload,
-        ).await?;
+        let (mut resp_type, mut resp_data) = self
+            .send_thp_encrypted(
+                path,
+                channel,
+                crate::constants::thp_message_type::THP_CREATE_NEW_SESSION,
+                &session_payload,
+            )
+            .await?;
 
         // The device may emit one or more ButtonRequests before completing —
         // e.g. confirming the passphrase, or showing its on-device keyboard.
         // Acknowledge each until the device returns the final Success/Failure.
         while resp_type == crate::constants::message_type::BUTTON_REQUEST {
             log::debug!("[USB-THP] ThpCreateNewSession: ButtonRequest, acking");
-            let (next_type, next_data) = self.send_thp_encrypted(
-                path, channel,
-                crate::constants::message_type::BUTTON_ACK, &[],
-            ).await?;
+            let (next_type, next_data) = self
+                .send_thp_encrypted(
+                    path,
+                    channel,
+                    crate::constants::message_type::BUTTON_ACK,
+                    &[],
+                )
+                .await?;
             resp_type = next_type;
             resp_data = next_data;
         }
@@ -878,7 +1008,11 @@ impl UsbTransport {
             encode_encrypted_message(state.protocol.state(), message_type, data)?
         };
 
-        log::debug!("[USB-THP] Sending encrypted message type {} ({} bytes)", message_type, message.len());
+        log::debug!(
+            "[USB-THP] Sending encrypted message type {} ({} bytes)",
+            message_type,
+            message.len()
+        );
         self.write_raw_thp(path, &message).await?;
 
         // Update state
@@ -886,7 +1020,10 @@ impl UsbTransport {
             let mut states = self.thp_states.write().await;
             if let Some(state) = states.get_mut(path) {
                 state.protocol.state_mut().update_sync_bit(true);
-                state.protocol.state_mut().update_nonce(true)
+                state
+                    .protocol
+                    .state_mut()
+                    .update_nonce(true)
                     .map_err(|e| ThpError::EncryptionError(e.to_string()))?;
             }
         }
@@ -912,8 +1049,10 @@ impl UsbTransport {
             if payload_len <= crc_len || response.len() < header_len + payload_len {
                 return Err(ThpError::DecryptionError(format!(
                     "Invalid payload: response_len={}, payload_len={}",
-                    response.len(), payload_len
-                )).into());
+                    response.len(),
+                    payload_len
+                ))
+                .into());
             }
 
             let encrypted_payload = &response[header_len..header_len + payload_len - crc_len];
@@ -921,19 +1060,28 @@ impl UsbTransport {
             let states = self.thp_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
 
-            let creds = state.protocol.state().handshake_credentials()
+            let creds = state
+                .protocol
+                .state()
+                .handshake_credentials()
                 .ok_or(ThpError::StateMissing)?;
 
-            let key: [u8; 32] = creds.trezor_key.clone().try_into()
+            let key: [u8; 32] = creds
+                .trezor_key
+                .clone()
+                .try_into()
                 .map_err(|_| ThpError::DecryptionError("Invalid key".to_string()))?;
 
             let recv_nonce = state.protocol.state().recv_nonce();
             let iv = crate::protocol::thp::crypto::get_iv_from_nonce(recv_nonce);
 
-            let decrypted = crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, &[], encrypted_payload)?;
+            let decrypted =
+                crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, &[], encrypted_payload)?;
 
             if decrypted.len() < 3 {
-                return Err(ThpError::DecryptionError("Decrypted payload too short".to_string()).into());
+                return Err(
+                    ThpError::DecryptionError("Decrypted payload too short".to_string()).into(),
+                );
             }
 
             let _session_id = decrypted[0];
@@ -948,12 +1096,19 @@ impl UsbTransport {
             let mut states = self.thp_states.write().await;
             if let Some(state) = states.get_mut(path) {
                 state.protocol.state_mut().update_sync_bit(false);
-                state.protocol.state_mut().update_nonce(false)
+                state
+                    .protocol
+                    .state_mut()
+                    .update_nonce(false)
                     .map_err(|e| ThpError::DecryptionError(e.to_string()))?;
             }
         }
 
-        log::debug!("[USB-THP] Received encrypted response type {} ({} bytes)", resp_type, resp_data.len());
+        log::debug!(
+            "[USB-THP] Received encrypted response type {} ({} bytes)",
+            resp_type,
+            resp_data.len()
+        );
         Ok((resp_type, resp_data))
     }
 }
@@ -1010,9 +1165,9 @@ impl TransportApi for UsbTransport {
 
         if has_kernel_driver {
             log::debug!("[USB] Detaching kernel driver");
-            handle
-                .detach_kernel_driver(USB_INTERFACE_ID)
-                .map_err(|e| TransportError::UnableToOpen(format!("detach_kernel_driver: {}", e)))?;
+            handle.detach_kernel_driver(USB_INTERFACE_ID).map_err(|e| {
+                TransportError::UnableToOpen(format!("detach_kernel_driver: {}", e))
+            })?;
         }
 
         // Set active configuration
@@ -1023,7 +1178,9 @@ impl TransportApi for UsbTransport {
                 log::debug!("[USB] Configuration already set (busy)");
             }
             Err(e) => {
-                return Err(TransportError::UnableToOpen(format!("set_configuration: {}", e)).into());
+                return Err(
+                    TransportError::UnableToOpen(format!("set_configuration: {}", e)).into(),
+                );
             }
         }
 
@@ -1058,7 +1215,9 @@ impl TransportApi for UsbTransport {
         log::debug!("[USB] Buffer cleared");
 
         // Store handle
-        let mut handles = self.handles.write()
+        let mut handles = self
+            .handles
+            .write()
             .map_err(|e| TransportError::UnableToOpen(format!("lock poisoned: {}", e)))?;
         handles.insert(
             path.to_string(),
@@ -1072,7 +1231,9 @@ impl TransportApi for UsbTransport {
     }
 
     async fn close(&self, path: &str) -> Result<()> {
-        let mut handles = self.handles.write()
+        let mut handles = self
+            .handles
+            .write()
             .map_err(|e| TransportError::UnableToClose(format!("lock poisoned: {}", e)))?;
         if let Some(open_device) = handles.remove(path) {
             // Release interface
@@ -1092,11 +1253,10 @@ impl TransportApi for UsbTransport {
 
         // Use spawn_blocking for synchronous USB operations
         tokio::task::spawn_blocking(move || {
-            let handles = handles.read()
+            let handles = handles
+                .read()
                 .map_err(|e| TransportError::DataTransfer(format!("lock poisoned: {}", e)))?;
-            let open_device = handles
-                .get(&path)
-                .ok_or(TransportError::DeviceNotFound)?;
+            let open_device = handles.get(&path).ok_or(TransportError::DeviceNotFound)?;
 
             let mut buffer = vec![0u8; USB_CHUNK_SIZE];
             let timeout = Duration::from_millis(USB_TIMEOUT_MS);
@@ -1105,7 +1265,10 @@ impl TransportApi for UsbTransport {
             let mut attempts = 0;
             let max_attempts = 10;
             loop {
-                match open_device.handle.read_interrupt(USB_ENDPOINT_IN, &mut buffer, timeout) {
+                match open_device
+                    .handle
+                    .read_interrupt(USB_ENDPOINT_IN, &mut buffer, timeout)
+                {
                     Ok(bytes_read) if bytes_read > 0 => {
                         buffer.truncate(bytes_read);
                         return Ok(buffer);
@@ -1114,17 +1277,31 @@ impl TransportApi for UsbTransport {
                         // Got 0 bytes, retry
                         attempts += 1;
                         if attempts >= max_attempts {
-                            return Err(TransportError::DataTransfer("No data received after retries".to_string()).into());
+                            return Err(TransportError::DataTransfer(
+                                "No data received after retries".to_string(),
+                            )
+                            .into());
                         }
-                        log::debug!("[USB] read_interrupt got 0 bytes, retrying ({}/{})", attempts, max_attempts);
+                        log::debug!(
+                            "[USB] read_interrupt got 0 bytes, retrying ({}/{})",
+                            attempts,
+                            max_attempts
+                        );
                         std::thread::sleep(Duration::from_millis(100));
                     }
                     Err(rusb::Error::Timeout) => {
                         attempts += 1;
                         if attempts >= max_attempts {
-                            return Err(TransportError::DataTransfer("Read timeout after retries".to_string()).into());
+                            return Err(TransportError::DataTransfer(
+                                "Read timeout after retries".to_string(),
+                            )
+                            .into());
                         }
-                        log::debug!("[USB] read_interrupt timeout, retrying ({}/{})", attempts, max_attempts);
+                        log::debug!(
+                            "[USB] read_interrupt timeout, retrying ({}/{})",
+                            attempts,
+                            max_attempts
+                        );
                     }
                     Err(e) => {
                         return Err(TransportError::DataTransfer(e.to_string()).into());
@@ -1149,11 +1326,10 @@ impl TransportApi for UsbTransport {
 
         // Use spawn_blocking for synchronous USB operations
         tokio::task::spawn_blocking(move || {
-            let handles = handles.read()
+            let handles = handles
+                .read()
                 .map_err(|e| TransportError::DataTransfer(format!("lock poisoned: {}", e)))?;
-            let open_device = handles
-                .get(&path)
-                .ok_or(TransportError::DeviceNotFound)?;
+            let open_device = handles.get(&path).ok_or(TransportError::DeviceNotFound)?;
 
             let timeout = Duration::from_millis(USB_TIMEOUT_MS);
 
@@ -1184,7 +1360,9 @@ impl Transport for UsbTransport {
     async fn acquire(&self, path: &str, previous: Option<&str>) -> Result<String> {
         // Check if device is already open
         let needs_open = {
-            let handles = self.handles.read()
+            let handles = self
+                .handles
+                .read()
                 .map_err(|e| TransportError::DataTransfer(format!("lock poisoned: {}", e)))?;
             !handles.contains_key(path)
         };
@@ -1236,12 +1414,7 @@ impl Transport for UsbTransport {
             .map_err(|e| TransportError::DataTransfer(e.to_string()).into())
     }
 
-    async fn call(
-        &self,
-        session: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+    async fn call(&self, session: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)> {
         let path = self
             .sessions
             .get_path(session)
@@ -1258,8 +1431,13 @@ impl Transport for UsbTransport {
                 let state = states.get(&path).ok_or(TransportError::DeviceNotFound)?;
                 *state.protocol.state().channel()
             };
-            log::debug!("[USB-THP] Using THP encrypted call for message type {}", message_type);
-            return self.send_thp_encrypted(&path, &channel, message_type, data).await;
+            log::debug!(
+                "[USB-THP] Using THP encrypted call for message type {}",
+                message_type
+            );
+            return self
+                .send_thp_encrypted(&path, &channel, message_type, data)
+                .await;
         }
 
         // V1 protocol path
@@ -1280,11 +1458,7 @@ impl Transport for UsbTransport {
 
         // Send all chunks
         for (i, c) in chunks.iter().enumerate() {
-            log::trace!(
-                "[USB] Writing chunk {}: {:02x?}",
-                i,
-                &c[..c.len().min(16)]
-            );
+            log::trace!("[USB] Writing chunk {}: {:02x?}", i, &c[..c.len().min(16)]);
             self.write(&path, c).await?;
         }
 
@@ -1317,18 +1491,23 @@ impl Transport for UsbTransport {
                 break;
             } else {
                 // Skip non-Protocol v1 chunks (preamble/device info)
-                log::debug!("[USB] Skipping non-Protocol v1 chunk (first bytes: {:02x} {:02x})",
-                    chunk.get(0).unwrap_or(&0), chunk.get(1).unwrap_or(&0));
+                log::debug!(
+                    "[USB] Skipping non-Protocol v1 chunk (first bytes: {:02x} {:02x})",
+                    chunk.get(0).unwrap_or(&0),
+                    chunk.get(1).unwrap_or(&0)
+                );
             }
         }
 
-        let first_chunk = first_chunk
-            .ok_or_else(|| TransportError::DataTransfer("No Protocol v1 header found".to_string()))?;
+        let first_chunk = first_chunk.ok_or_else(|| {
+            TransportError::DataTransfer("No Protocol v1 header found".to_string())
+        })?;
 
         let decoded = self.protocol.decode(&first_chunk)?;
         log::debug!(
             "[USB] Protocol v1 message: type={}, length={}",
-            decoded.message_type, decoded.length
+            decoded.message_type,
+            decoded.length
         );
 
         response_chunks.push(first_chunk);
@@ -1345,7 +1524,11 @@ impl Transport for UsbTransport {
         if remaining > 0 {
             let continuation_payload = USB_CHUNK_SIZE - 1; // 1 byte for magic
             let num_chunks = (remaining + continuation_payload - 1) / continuation_payload;
-            log::trace!("[USB] Need {} more chunks for {} remaining bytes", num_chunks, remaining);
+            log::trace!(
+                "[USB] Need {} more chunks for {} remaining bytes",
+                num_chunks,
+                remaining
+            );
 
             for _i in 0..num_chunks {
                 let chunk = self.read(&path).await?;

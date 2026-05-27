@@ -15,15 +15,15 @@
 //! All chunks are padded to exactly chunk_size bytes (64 for USB, 244 for BLE)
 //! ```
 
-mod encode;
 mod decode;
+mod encode;
 
-pub use encode::*;
 pub use decode::*;
+pub use encode::*;
 
 use crate::constants::{
-    PROTOCOL_V1_HEADER_BYTE, PROTOCOL_V1_HEADER_SIZE, PROTOCOL_V1_MAGIC,
-    USB_CHUNK_SIZE, BLE_CHUNK_SIZE,
+    BLE_CHUNK_SIZE, PROTOCOL_V1_HEADER_BYTE, PROTOCOL_V1_HEADER_SIZE, PROTOCOL_V1_MAGIC,
+    USB_CHUNK_SIZE,
 };
 use crate::error::Result;
 use crate::protocol::{DecodedMessage, Protocol};

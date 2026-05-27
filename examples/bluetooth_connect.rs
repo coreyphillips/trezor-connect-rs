@@ -13,8 +13,8 @@
 //! Run with debug logging: RUST_LOG=debug cargo run --example bluetooth_connect
 
 use std::io::{self, Write};
-use trezor_connect_rs::{BluetoothTransport, Result};
 use trezor_connect_rs::transport::Transport;
+use trezor_connect_rs::{BluetoothTransport, Result};
 
 // Message type constants
 const MSG_SUCCESS: u16 = 2;
@@ -105,7 +105,10 @@ async fn main() -> Result<()> {
                 println!("Starting pairing flow...\n");
 
                 // Perform pairing with user code input
-                match transport.perform_pairing(&device_path, prompt_for_code).await {
+                match transport
+                    .perform_pairing(&device_path, prompt_for_code)
+                    .await
+                {
                     Ok(()) => {
                         println!("\n=== Pairing Successful! ===");
 
@@ -121,9 +124,20 @@ async fn main() -> Result<()> {
                         create_session.push(0x0a); // field 1, wire type 2 (string)
                         create_session.push(0x00); // length 0 (empty string)
 
-                        match transport.send_encrypted_message(&device_path, MSG_THP_CREATE_SESSION, &create_session).await {
+                        match transport
+                            .send_encrypted_message(
+                                &device_path,
+                                MSG_THP_CREATE_SESSION,
+                                &create_session,
+                            )
+                            .await
+                        {
                             Ok((resp_type, resp_data)) => {
-                                println!("ThpCreateNewSession response type: {} ({} bytes)", resp_type, resp_data.len());
+                                println!(
+                                    "ThpCreateNewSession response type: {} ({} bytes)",
+                                    resp_type,
+                                    resp_data.len()
+                                );
 
                                 if resp_type == MSG_FAILURE {
                                     println!("Session creation failed!");
@@ -147,9 +161,16 @@ async fn main() -> Result<()> {
 
                         // Now send GetFeatures - THP uses this instead of Initialize
                         println!("\nSending GetFeatures command...");
-                        match transport.send_encrypted_message(&device_path, MSG_GET_FEATURES, &[]).await {
+                        match transport
+                            .send_encrypted_message(&device_path, MSG_GET_FEATURES, &[])
+                            .await
+                        {
                             Ok((resp_type, resp_data)) => {
-                                println!("GetFeatures response type {} ({} bytes)", resp_type, resp_data.len());
+                                println!(
+                                    "GetFeatures response type {} ({} bytes)",
+                                    resp_type,
+                                    resp_data.len()
+                                );
 
                                 if resp_type == MSG_FAILURE {
                                     println!("\n=== Received Failure Response ===");
@@ -160,11 +181,16 @@ async fn main() -> Result<()> {
                                 } else if resp_type == MSG_FEATURES {
                                     // Features message
                                     println!("\n=== Device Features Received! ===");
-                                    println!("Raw features data ({} bytes): {:02x?}",
-                                        resp_data.len(), &resp_data[..resp_data.len().min(50)]);
+                                    println!(
+                                        "Raw features data ({} bytes): {:02x?}",
+                                        resp_data.len(),
+                                        &resp_data[..resp_data.len().min(50)]
+                                    );
 
                                     // Run the demo operations
-                                    if let Err(e) = run_demo_operations(&transport, &device_path).await {
+                                    if let Err(e) =
+                                        run_demo_operations(&transport, &device_path).await
+                                    {
                                         println!("Demo operations error: {}", e);
                                     }
                                 }
@@ -215,11 +241,11 @@ async fn handle_button_request(
 async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) -> Result<()> {
     // BIP84 path for native SegWit: m/84'/0'/0'/0/0
     let address_path: [u32; 5] = [
-        0x80000000 | 84,  // 84'
-        0x80000000 | 0,   // 0'
-        0x80000000 | 0,   // 0'
-        0,                // 0
-        0,                // 0
+        0x80000000 | 84, // 84'
+        0x80000000 | 0,  // 0'
+        0x80000000 | 0,  // 0'
+        0,               // 0
+        0,               // 0
     ];
 
     // ========================================
@@ -249,7 +275,10 @@ async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) 
             }
         }
     } else if resp_type == MSG_FAILURE {
-        println!("GetAddress failed: {}", parse_failure(&resp_data).unwrap_or_default());
+        println!(
+            "GetAddress failed: {}",
+            parse_failure(&resp_data).unwrap_or_default()
+        );
         return Ok(());
     } else {
         println!("Unexpected response type {}: {:02x?}", resp_type, resp_data);
@@ -271,7 +300,8 @@ async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) 
 
     // Handle ButtonRequest(s) - signing usually requires confirmation
     while resp_type == MSG_BUTTON_REQUEST {
-        (resp_type, resp_data) = handle_button_request(transport, device_path, MSG_MESSAGE_SIGNATURE).await?;
+        (resp_type, resp_data) =
+            handle_button_request(transport, device_path, MSG_MESSAGE_SIGNATURE).await?;
     }
 
     let signature = if resp_type == MSG_MESSAGE_SIGNATURE {
@@ -287,7 +317,10 @@ async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) 
             }
         }
     } else if resp_type == MSG_FAILURE {
-        println!("SignMessage failed: {}", parse_failure(&resp_data).unwrap_or_default());
+        println!(
+            "SignMessage failed: {}",
+            parse_failure(&resp_data).unwrap_or_default()
+        );
         return Ok(());
     } else {
         println!("Unexpected response type {}: {:02x?}", resp_type, resp_data);
@@ -313,7 +346,10 @@ async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) 
     if resp_type == MSG_SUCCESS {
         println!("✓ Signature verified successfully!");
     } else if resp_type == MSG_FAILURE {
-        println!("✗ Verification failed: {}", parse_failure(&resp_data).unwrap_or_default());
+        println!(
+            "✗ Verification failed: {}",
+            parse_failure(&resp_data).unwrap_or_default()
+        );
     } else {
         println!("Unexpected response type {}: {:02x?}", resp_type, resp_data);
     }
@@ -336,7 +372,10 @@ async fn run_demo_operations(transport: &BluetoothTransport, device_path: &str) 
     if resp_type == MSG_SUCCESS {
         println!("✓ Signature verified (unexpected!)");
     } else if resp_type == MSG_FAILURE {
-        println!("✗ Verification failed (expected): {}", parse_failure(&resp_data).unwrap_or_default());
+        println!(
+            "✗ Verification failed (expected): {}",
+            parse_failure(&resp_data).unwrap_or_default()
+        );
     } else {
         println!("Unexpected response type {}: {:02x?}", resp_type, resp_data);
     }

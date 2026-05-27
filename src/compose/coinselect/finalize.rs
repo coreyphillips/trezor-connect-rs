@@ -3,8 +3,8 @@
 //! After selecting UTXOs that cover the target, this module determines whether
 //! to add a change output or absorb the remainder into fees.
 
-use crate::types::bitcoin::ScriptType;
 use crate::compose::{dust, weight};
+use crate::types::bitcoin::ScriptType;
 
 /// Result of finalization.
 #[derive(Debug, Clone)]
@@ -103,8 +103,21 @@ mod tests {
         let input_types = vec![ScriptType::SpendWitness];
         let output_weights = vec![output_weight(ScriptType::SpendWitness)];
 
-        match finalize(100_000, 50_000, 10.0, 0, &input_types, &output_weights, ScriptType::SpendWitness) {
-            FinalizeResult::Success { fee, change_amount, has_change, .. } => {
+        match finalize(
+            100_000,
+            50_000,
+            10.0,
+            0,
+            &input_types,
+            &output_weights,
+            ScriptType::SpendWitness,
+        ) {
+            FinalizeResult::Success {
+                fee,
+                change_amount,
+                has_change,
+                ..
+            } => {
                 assert!(has_change);
                 assert!(change_amount > 0);
                 assert_eq!(fee + change_amount + 50_000, 100_000);
@@ -124,8 +137,20 @@ mod tests {
         let fee = weight::calculate_fee(10.0, w);
         let input_sum = 50_000 + fee + 100; // 100 sat change = dust
 
-        match finalize(input_sum, 50_000, 10.0, 0, &input_types, &output_weights, ScriptType::SpendWitness) {
-            FinalizeResult::Success { has_change, change_amount, .. } => {
+        match finalize(
+            input_sum,
+            50_000,
+            10.0,
+            0,
+            &input_types,
+            &output_weights,
+            ScriptType::SpendWitness,
+        ) {
+            FinalizeResult::Success {
+                has_change,
+                change_amount,
+                ..
+            } => {
                 assert!(!has_change);
                 assert_eq!(change_amount, 0);
             }
@@ -138,7 +163,15 @@ mod tests {
         let input_types = vec![ScriptType::SpendWitness];
         let output_weights = vec![output_weight(ScriptType::SpendWitness)];
 
-        match finalize(1_000, 50_000, 10.0, 0, &input_types, &output_weights, ScriptType::SpendWitness) {
+        match finalize(
+            1_000,
+            50_000,
+            10.0,
+            0,
+            &input_types,
+            &output_weights,
+            ScriptType::SpendWitness,
+        ) {
             FinalizeResult::InsufficientFunds => {}
             _ => panic!("Expected insufficient funds"),
         }

@@ -131,13 +131,7 @@ mod tests {
 
     #[test]
     fn test_serialize_path() {
-        let path = vec![
-            harden(84),
-            harden(0),
-            harden(0),
-            0,
-            0,
-        ];
+        let path = vec![harden(84), harden(0), harden(0), 0, 0];
         assert_eq!(serialize_path(&path), "m/84'/0'/0'/0/0");
     }
 

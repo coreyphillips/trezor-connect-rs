@@ -7,8 +7,8 @@
 //! - HKDF key derivation
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
@@ -118,7 +118,8 @@ pub fn aes_gcm_encrypt(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| ThpError::EncryptionError(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| ThpError::EncryptionError(e.to_string()))?;
 
     let nonce = Nonce::from_slice(nonce);
 
@@ -142,7 +143,8 @@ pub fn aes_gcm_decrypt(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| ThpError::DecryptionError(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|e| ThpError::DecryptionError(e.to_string()))?;
 
     let nonce = Nonce::from_slice(nonce);
 
@@ -443,12 +445,18 @@ mod tests {
 
         println!("pregenerator = {}", hex::encode(&pregenerator));
         // Expected from TypeScript: 4803f9eac322e03281436132121c82672b3c11b969f1d57cf4660f10ab3d8f78
-        assert_eq!(hex::encode(&pregenerator), "4803f9eac322e03281436132121c82672b3c11b969f1d57cf4660f10ab3d8f78");
+        assert_eq!(
+            hex::encode(&pregenerator),
+            "4803f9eac322e03281436132121c82672b3c11b969f1d57cf4660f10ab3d8f78"
+        );
 
         let generator = elligator2(&pregenerator);
         println!("generator = {}", hex::encode(&generator));
         // Expected from TypeScript: a29b0057e8cef8c2f9d7bbf081f47cc23ab90631157eb2340d97d0915519b218
-        assert_eq!(hex::encode(&generator), "a29b0057e8cef8c2f9d7bbf081f47cc23ab90631157eb2340d97d0915519b218");
+        assert_eq!(
+            hex::encode(&generator),
+            "a29b0057e8cef8c2f9d7bbf081f47cc23ab90631157eb2340d97d0915519b218"
+        );
 
         // Verify it's a valid point by checking it's not zero
         assert_ne!(generator, [0u8; 32]);
@@ -485,14 +493,19 @@ mod tests {
         let data_part = &full_message[..full_message.len() - 4];
         let crc_part = &full_message[full_message.len() - 4..];
         let recomputed = crc32(data_part);
-        assert_ne!(crc_part, &recomputed, "CRC should not match on corrupted data");
+        assert_ne!(
+            crc_part, &recomputed,
+            "CRC should not match on corrupted data"
+        );
     }
 
     #[test]
     fn test_x25519_with_generator() {
         // Test X25519 with a known generator to compare with TypeScript
         // TypeScript: curve25519([1, 0, 0, ...], generator) = 50b277635ad68e770344754fa0036ae8ce28e2ec3ba519b0af5148afdb1ff928
-        let generator = hex::decode("a29b0057e8cef8c2f9d7bbf081f47cc23ab90631157eb2340d97d0915519b218").unwrap();
+        let generator =
+            hex::decode("a29b0057e8cef8c2f9d7bbf081f47cc23ab90631157eb2340d97d0915519b218")
+                .unwrap();
         let generator: [u8; 32] = generator.try_into().unwrap();
 
         // Private key = [1, 0, 0, ...]
@@ -505,6 +518,9 @@ mod tests {
 
         println!("public_key = {}", hex::encode(&public_key));
         // Expected from TypeScript: 50b277635ad68e770344754fa0036ae8ce28e2ec3ba519b0af5148afdb1ff928
-        assert_eq!(hex::encode(&public_key), "50b277635ad68e770344754fa0036ae8ce28e2ec3ba519b0af5148afdb1ff928");
+        assert_eq!(
+            hex::encode(&public_key),
+            "50b277635ad68e770344754fa0036ae8ce28e2ec3ba519b0af5148afdb1ff928"
+        );
     }
 }

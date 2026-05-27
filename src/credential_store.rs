@@ -94,8 +94,8 @@ impl CredentialStore {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let data = if path.exists() {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| TrezorError::IoError(e.to_string()))?;
+            let content =
+                fs::read_to_string(&path).map_err(|e| TrezorError::IoError(e.to_string()))?;
             serde_json::from_str(&content)
                 .map_err(|e| TrezorError::IoError(format!("Failed to parse credentials: {}", e)))?
         } else {
@@ -137,8 +137,9 @@ impl CredentialStore {
             .map_err(|e| TrezorError::IoError(format!("Keychain entry error: {}", e)))?;
 
         match entry.get_password() {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|e| TrezorError::IoError(format!("Failed to parse keychain credentials: {}", e))),
+            Ok(content) => serde_json::from_str(&content).map_err(|e| {
+                TrezorError::IoError(format!("Failed to parse keychain credentials: {}", e))
+            }),
             Err(keyring::Error::NoEntry) => Ok(CredentialFile::new()),
             Err(e) => Err(TrezorError::IoError(format!("Keychain read error: {}", e)).into()),
         }
@@ -158,9 +159,11 @@ impl CredentialStore {
                 Err(e) => Err(TrezorError::IoError(format!("Keychain delete error: {}", e)).into()),
             }
         } else {
-            let content = serde_json::to_string(data)
-                .map_err(|e| TrezorError::IoError(format!("Failed to serialize credentials: {}", e)))?;
-            entry.set_password(&content)
+            let content = serde_json::to_string(data).map_err(|e| {
+                TrezorError::IoError(format!("Failed to serialize credentials: {}", e))
+            })?;
+            entry
+                .set_password(&content)
                 .map_err(|e| TrezorError::IoError(format!("Keychain write error: {}", e)))?;
             Ok(())
         }
@@ -173,8 +176,9 @@ impl CredentialStore {
                 if path.exists() {
                     let content = fs::read_to_string(path)
                         .map_err(|e| TrezorError::IoError(e.to_string()))?;
-                    self.data = serde_json::from_str(&content)
-                        .map_err(|e| TrezorError::IoError(format!("Failed to parse credentials: {}", e)))?;
+                    self.data = serde_json::from_str(&content).map_err(|e| {
+                        TrezorError::IoError(format!("Failed to parse credentials: {}", e))
+                    })?;
                     self.dirty = false;
                 }
             }
@@ -198,34 +202,42 @@ impl CredentialStore {
                 // Create parent directories if needed (owner-only: 0700)
                 if let Some(parent) = path.parent() {
                     if !parent.exists() {
-                        fs::create_dir_all(parent)
-                            .map_err(|e| TrezorError::IoError(format!("Failed to create directory: {}", e)))?;
+                        fs::create_dir_all(parent).map_err(|e| {
+                            TrezorError::IoError(format!("Failed to create directory: {}", e))
+                        })?;
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
                             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-                                .map_err(|e| TrezorError::IoError(format!("Failed to set directory permissions: {}", e)))?;
+                                .map_err(|e| {
+                                    TrezorError::IoError(format!(
+                                        "Failed to set directory permissions: {}",
+                                        e
+                                    ))
+                                })?;
                         }
                     }
                 }
 
-                let content = serde_json::to_string_pretty(&self.data)
-                    .map_err(|e| TrezorError::IoError(format!("Failed to serialize credentials: {}", e)))?;
+                let content = serde_json::to_string_pretty(&self.data).map_err(|e| {
+                    TrezorError::IoError(format!("Failed to serialize credentials: {}", e))
+                })?;
 
                 // Atomic write: write to temp file, set permissions, then rename into place
                 let tmp_path = path.with_extension("tmp");
-                fs::write(&tmp_path, &content)
-                    .map_err(|e| TrezorError::IoError(e.to_string()))?;
+                fs::write(&tmp_path, &content).map_err(|e| TrezorError::IoError(e.to_string()))?;
 
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))
-                        .map_err(|e| TrezorError::IoError(format!("Failed to set file permissions: {}", e)))?;
+                    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)).map_err(
+                        |e| TrezorError::IoError(format!("Failed to set file permissions: {}", e)),
+                    )?;
                 }
 
-                fs::rename(&tmp_path, path)
-                    .map_err(|e| TrezorError::IoError(format!("Failed to rename temp file: {}", e)))?;
+                fs::rename(&tmp_path, path).map_err(|e| {
+                    TrezorError::IoError(format!("Failed to rename temp file: {}", e))
+                })?;
             }
             #[cfg(feature = "os-keychain")]
             Backend::Keychain { service } => {
@@ -244,7 +256,9 @@ impl CredentialStore {
 
     /// Store a credential for a device.
     pub fn store(&mut self, credential: StoredCredential) -> Result<()> {
-        self.data.credentials.insert(credential.device_id.clone(), credential);
+        self.data
+            .credentials
+            .insert(credential.device_id.clone(), credential);
         self.dirty = true;
         self.save()
     }

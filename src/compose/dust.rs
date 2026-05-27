@@ -3,8 +3,8 @@
 //! Determines the minimum output amount that is not considered "dust"
 //! by Bitcoin Core relay policy.
 
-use crate::types::bitcoin::ScriptType;
 use super::weight;
+use crate::types::bitcoin::ScriptType;
 
 /// Default dust threshold for Bitcoin (546 satoshis).
 const DEFAULT_DUST_THRESHOLD: u64 = 546;

@@ -8,8 +8,8 @@
 
 use std::io::{self, Write};
 use std::sync::Arc;
-use trezor_connect_rs::{TrezorClient, UsbTransport, Result, TrezorUiCallback, PassphraseResponse};
 use trezor_connect_rs::transport::Transport;
+use trezor_connect_rs::{PassphraseResponse, Result, TrezorClient, TrezorUiCallback, UsbTransport};
 
 /// UI callback that prompts for PIN and passphrase via stdin.
 struct StdinUiCallback;
@@ -76,7 +76,8 @@ async fn main() -> Result<()> {
     // Initialize device and get features
     println!("\nSending Initialize message...");
     let features = client.initialize().await?;
-    println!("\nConnected to: {} ({})",
+    println!(
+        "\nConnected to: {} ({})",
         features.label.as_deref().unwrap_or_default(),
         features.model.as_deref().unwrap_or_default()
     );
@@ -111,11 +112,9 @@ async fn main() -> Result<()> {
     println!("Verifying the signature on device...");
     println!("Please confirm on your Trezor device.");
 
-    let verified = client.verify_message(
-        &signed.address,
-        &signed.signature,
-        message,
-    ).await?;
+    let verified = client
+        .verify_message(&signed.address, &signed.signature, message)
+        .await?;
 
     if verified {
         println!("\nSignature verified successfully!");
@@ -126,13 +125,14 @@ async fn main() -> Result<()> {
     // Test with a tampered message (should fail)
     println!("\n=== Testing with Tampered Message ===");
     let tampered_message = b"Hello from Rust trezor-connect! (tampered)";
-    println!("Verifying with tampered message: \"{}\"", String::from_utf8_lossy(tampered_message));
+    println!(
+        "Verifying with tampered message: \"{}\"",
+        String::from_utf8_lossy(tampered_message)
+    );
 
-    let tampered_result = client.verify_message(
-        &signed.address,
-        &signed.signature,
-        tampered_message,
-    ).await?;
+    let tampered_result = client
+        .verify_message(&signed.address, &signed.signature, tampered_message)
+        .await?;
 
     if tampered_result {
         println!("WARNING: Tampered message verified (unexpected!)");

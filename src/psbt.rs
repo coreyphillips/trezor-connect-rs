@@ -25,7 +25,10 @@ const HARDENED: u32 = 0x80000000;
 /// The `network` parameter controls address derivation and the coin name sent
 /// to the device. Use `bitcoin::Network::Bitcoin` for mainnet,
 /// `bitcoin::Network::Testnet` for testnet, etc.
-pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> Result<SignTxParams> {
+pub fn psbt_to_sign_tx_params(
+    psbt_bytes: &[u8],
+    network: bitcoin::Network,
+) -> Result<SignTxParams> {
     let psbt = Psbt::deserialize(psbt_bytes)
         .map_err(|e| DeviceError::InvalidInput(format!("Invalid PSBT: {}", e)))?;
 
@@ -45,18 +48,17 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
         let sequence = tx_input.sequence.0;
 
         // Extract derivation path from bip32_derivation (first key)
-        let (path_str, script_type) = if let Some((_, (_, derivation))) =
-            psbt_input.bip32_derivation.iter().next()
-        {
-            let path = format_derivation_path(derivation);
-            let st = infer_script_type_from_path(derivation);
-            (path, st)
-        } else if let Some((_, (_, derivation))) = psbt_input.tap_key_origins.iter().next() {
-            let path = format_derivation_path(&derivation.1);
-            (path, ScriptType::SpendTaproot)
-        } else {
-            ("m/84'/0'/0'/0/0".to_string(), ScriptType::SpendWitness)
-        };
+        let (path_str, script_type) =
+            if let Some((_, (_, derivation))) = psbt_input.bip32_derivation.iter().next() {
+                let path = format_derivation_path(derivation);
+                let st = infer_script_type_from_path(derivation);
+                (path, st)
+            } else if let Some((_, (_, derivation))) = psbt_input.tap_key_origins.iter().next() {
+                let path = format_derivation_path(&derivation.1);
+                (path, ScriptType::SpendTaproot)
+            } else {
+                ("m/84'/0'/0'/0/0".to_string(), ScriptType::SpendWitness)
+            };
 
         // Extract amount from witness_utxo or non_witness_utxo
         let amount = if let Some(ref witness_utxo) = psbt_input.witness_utxo {
@@ -136,18 +138,17 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
 
         if is_change {
             let psbt_out = psbt_output.unwrap();
-            let (path_str, script_type) = if let Some((_, (_, derivation))) =
-                psbt_out.bip32_derivation.iter().next()
-            {
-                let path = format_derivation_path(derivation);
-                let st = infer_script_type_from_path(derivation);
-                (path, st)
-            } else if let Some((_, (_, derivation))) = psbt_out.tap_key_origins.iter().next() {
-                let path = format_derivation_path(&derivation.1);
-                (path, ScriptType::SpendTaproot)
-            } else {
-                unreachable!()
-            };
+            let (path_str, script_type) =
+                if let Some((_, (_, derivation))) = psbt_out.bip32_derivation.iter().next() {
+                    let path = format_derivation_path(derivation);
+                    let st = infer_script_type_from_path(derivation);
+                    (path, st)
+                } else if let Some((_, (_, derivation))) = psbt_out.tap_key_origins.iter().next() {
+                    let path = format_derivation_path(&derivation.1);
+                    (path, ScriptType::SpendTaproot)
+                } else {
+                    unreachable!()
+                };
 
             outputs.push(SignTxOutput {
                 address: None,
@@ -181,14 +182,11 @@ pub fn psbt_to_sign_tx_params(psbt_bytes: &[u8], network: bitcoin::Network) -> R
             });
         } else {
             // External output - extract address from script_pubkey
-            let address = bitcoin::Address::from_script(
-                &tx_output.script_pubkey,
-                network,
-            )
-            .map(|a| a.to_string())
-            .map_err(|e| {
-                DeviceError::InvalidInput(format!("Output {}: cannot derive address: {}", i, e))
-            })?;
+            let address = bitcoin::Address::from_script(&tx_output.script_pubkey, network)
+                .map(|a| a.to_string())
+                .map_err(|e| {
+                    DeviceError::InvalidInput(format!("Output {}: cannot derive address: {}", i, e))
+                })?;
 
             outputs.push(SignTxOutput {
                 address: Some(address),
@@ -312,16 +310,10 @@ mod tests {
         use std::str::FromStr;
 
         let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
-        assert_eq!(
-            infer_script_type_from_path(&path),
-            ScriptType::SpendWitness
-        );
+        assert_eq!(infer_script_type_from_path(&path), ScriptType::SpendWitness);
 
         let path = DerivationPath::from_str("m/44'/0'/0'/0/0").unwrap();
-        assert_eq!(
-            infer_script_type_from_path(&path),
-            ScriptType::SpendAddress
-        );
+        assert_eq!(infer_script_type_from_path(&path), ScriptType::SpendAddress);
 
         let path = DerivationPath::from_str("m/49'/0'/0'/0/0").unwrap();
         assert_eq!(
@@ -330,9 +322,6 @@ mod tests {
         );
 
         let path = DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
-        assert_eq!(
-            infer_script_type_from_path(&path),
-            ScriptType::SpendTaproot
-        );
+        assert_eq!(infer_script_type_from_path(&path), ScriptType::SpendTaproot);
     }
 }

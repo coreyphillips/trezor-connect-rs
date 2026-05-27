@@ -97,7 +97,10 @@ pub fn is_unexpected_state(expected: &str, current: &str) -> bool {
     if expected.is_empty() || current.is_empty() {
         return false;
     }
-    match (parse_static_session_id(expected), parse_static_session_id(current)) {
+    match (
+        parse_static_session_id(expected),
+        parse_static_session_id(current),
+    ) {
         (Some(e), Some(c)) => {
             e.first_testnet_address != c.first_testnet_address || e.device_id != c.device_id
         }

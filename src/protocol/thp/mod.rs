@@ -16,22 +16,22 @@
 //! 4. Pairing (if required) - Verify device identity
 //! 5. Encrypted Communication - All subsequent messages encrypted
 
-pub mod state;
 pub mod crypto;
+pub mod decode;
+pub mod encode;
 pub mod handshake;
 pub mod pairing;
 pub mod pairing_messages;
-pub mod encode;
-pub mod decode;
+pub mod state;
 
-pub use state::ThpState;
 pub use crypto::*;
+pub use decode::*;
+pub use encode::*;
 pub use handshake::*;
 pub use pairing::*;
-pub use encode::*;
-pub use decode::*;
+pub use state::ThpState;
 
-use crate::constants::{thp_control, BLE_CHUNK_SIZE, THP_HEADER_SIZE};
+use crate::constants::{BLE_CHUNK_SIZE, THP_HEADER_SIZE, thp_control};
 use crate::error::Result;
 use crate::protocol::{DecodedMessage, Protocol};
 

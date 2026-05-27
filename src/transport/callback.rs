@@ -18,18 +18,17 @@ use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
 use crate::constants::{PROTOCOL_V1_HEADER_SIZE, thp_control};
-use crate::error::{Result, TransportError, ThpError};
-use crate::protocol::chunk;
-use crate::protocol::v1::ProtocolV1;
-use crate::protocol::thp::{
-    ProtocolThp, encode_channel_allocation_request, encode_handshake_init_request,
-    encode_handshake_completion_request, encode_ack, encode_encrypted_message,
-    handle_handshake_init, HandshakeInitResponse, get_handshake_hash,
-    parse_handshake_completion_response, StoredCredential,
-    state::ThpHandshakeCredentials,
-    pairing_messages::encode_create_new_session,
-};
+use crate::error::{Result, ThpError, TransportError};
 use crate::protocol::Protocol;
+use crate::protocol::chunk;
+use crate::protocol::thp::{
+    HandshakeInitResponse, ProtocolThp, StoredCredential, encode_ack,
+    encode_channel_allocation_request, encode_encrypted_message,
+    encode_handshake_completion_request, encode_handshake_init_request, get_handshake_hash,
+    handle_handshake_init, pairing_messages::encode_create_new_session,
+    parse_handshake_completion_response, state::ThpHandshakeCredentials,
+};
+use crate::protocol::v1::ProtocolV1;
 use crate::transport::session::SessionManager;
 use crate::transport::traits::{DeviceDescriptor, Transport};
 
@@ -67,7 +66,12 @@ pub trait TransportCallback: Send + Sync {
     ///
     /// Default implementation returns None, meaning the transport should
     /// fall back to chunk-based Protocol V1 communication.
-    fn call_message(&self, path: &str, message_type: u16, data: &[u8]) -> Option<CallbackMessageResult> {
+    fn call_message(
+        &self,
+        path: &str,
+        message_type: u16,
+        data: &[u8],
+    ) -> Option<CallbackMessageResult> {
         // Suppress unused variable warnings
         let _ = (path, message_type, data);
         None // Default: not supported, use chunk-based protocol
@@ -266,7 +270,7 @@ impl CallbackTransport {
             callback,
             sessions: SessionManager::new(),
             protocol: ProtocolV1::usb(), // Default, will be adjusted per device
-            chunk_size: 64, // Default USB, adjusted on open
+            chunk_size: 64,              // Default USB, adjusted on open
             ble_states: Arc::new(RwLock::new(HashMap::new())),
             pairing_callback: None,
             host_name: "trezor-connect-rs".to_string(),
@@ -308,7 +312,8 @@ impl CallbackTransport {
         // Own the caller's `String` in `Zeroizing` immediately so their
         // handed-over copy is wiped on drop, not just the normalized one we keep.
         let passphrase = Zeroizing::new(passphrase);
-        self.session_passphrase = Zeroizing::new(crate::passphrase::normalize_passphrase(&passphrase));
+        self.session_passphrase =
+            Zeroizing::new(crate::passphrase::normalize_passphrase(&passphrase));
         self.session_on_device = on_device;
         self
     }
@@ -328,7 +333,11 @@ impl CallbackTransport {
     }
 
     /// Set the application identity used during THP pairing.
-    pub fn with_app_identity(mut self, host_name: impl Into<String>, app_name: impl Into<String>) -> Self {
+    pub fn with_app_identity(
+        mut self,
+        host_name: impl Into<String>,
+        app_name: impl Into<String>,
+    ) -> Self {
         self.host_name = host_name.into();
         self.app_name = app_name.into();
         self
@@ -337,7 +346,10 @@ impl CallbackTransport {
     /// Check if a device completed a THP handshake (BLE or USB-THP).
     pub async fn has_thp(&self, path: &str) -> bool {
         let states = self.ble_states.read().await;
-        states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
+        states
+            .get(path)
+            .map(|s| s.handshake_complete)
+            .unwrap_or(false)
     }
 
     /// Check if a device needs THP — either a known BLE device or a device
@@ -410,12 +422,20 @@ impl CallbackTransport {
                         let available = chunk.len().saturating_sub(header_size);
                         let payload_len = (decoded.length as usize).min(available);
                         let raw_payload = &chunk[header_size..header_size + payload_len];
-                        let trimmed_len = raw_payload.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+                        let trimmed_len = raw_payload
+                            .iter()
+                            .rposition(|&b| b != 0)
+                            .map_or(0, |i| i + 1);
                         let payload = &raw_payload[..trimmed_len];
 
-                        if let Ok(failure) = <crate::protos::common::Failure as prost::Message>::decode(payload) {
-                            if failure.code == Some(17) { // FailureInvalidProtocol
-                                log::info!("[Callback] USB device responded with Failure_InvalidProtocol — THP detected!");
+                        if let Ok(failure) =
+                            <crate::protos::common::Failure as prost::Message>::decode(payload)
+                        {
+                            if failure.code == Some(17) {
+                                // FailureInvalidProtocol
+                                log::info!(
+                                    "[Callback] USB device responded with Failure_InvalidProtocol — THP detected!"
+                                );
                                 return Ok(true);
                             }
                         }
@@ -432,7 +452,10 @@ impl CallbackTransport {
                 || ctrl == thp_control::ERROR
                 || ctrl == thp_control::HANDSHAKE_INIT_RES
             {
-                log::info!("[Callback] USB device responded with THP control byte 0x{:02x} — THP detected!", chunk[0]);
+                log::info!(
+                    "[Callback] USB device responded with THP control byte 0x{:02x} — THP detected!",
+                    chunk[0]
+                );
                 return Ok(true);
             }
         }
@@ -453,8 +476,12 @@ impl CallbackTransport {
             let mut padded = vec![0u8; chunk_size];
             padded[..data.len()].copy_from_slice(data);
 
-            log::debug!("[Callback] Writing {} bytes (padded to {}): {:02x?}",
-                data.len(), padded.len(), &padded[..padded.len().min(20)]);
+            log::debug!(
+                "[Callback] Writing {} bytes (padded to {}): {:02x?}",
+                data.len(),
+                padded.len(),
+                &padded[..padded.len().min(20)]
+            );
 
             let result = self.callback.write_chunk(path, &padded);
             if !result.success {
@@ -462,9 +489,17 @@ impl CallbackTransport {
             }
         } else {
             // Multi-chunk: extract channel from first chunk bytes [1..3]
-            let channel = if data.len() >= 3 { [data[1], data[2]] } else { [0, 0] };
+            let channel = if data.len() >= 3 {
+                [data[1], data[2]]
+            } else {
+                [0, 0]
+            };
 
-            log::debug!("[Callback] Multi-chunk write: {} bytes total, chunk_size={}", data.len(), chunk_size);
+            log::debug!(
+                "[Callback] Multi-chunk write: {} bytes total, chunk_size={}",
+                data.len(),
+                chunk_size
+            );
 
             // First chunk: first chunk_size bytes, padded
             let first_end = chunk_size.min(data.len());
@@ -491,8 +526,11 @@ impl CallbackTransport {
                 cont_chunk[cont_header_len..cont_header_len + payload_len]
                     .copy_from_slice(&data[offset..end]);
 
-                log::debug!("[Callback] Writing continuation chunk: {} bytes payload at offset {}",
-                    payload_len, offset);
+                log::debug!(
+                    "[Callback] Writing continuation chunk: {} bytes payload at offset {}",
+                    payload_len,
+                    offset
+                );
 
                 let result = self.callback.write_chunk(path, &cont_chunk);
                 if !result.success {
@@ -509,8 +547,12 @@ impl CallbackTransport {
         for attempt in 0..max_attempts {
             let result = self.callback.read_chunk(path);
             if result.success && !result.data.is_empty() {
-                log::debug!("[Callback] Read {} bytes on attempt {}: {:02x?}",
-                    result.data.len(), attempt, &result.data[..result.data.len().min(20)]);
+                log::debug!(
+                    "[Callback] Read {} bytes on attempt {}: {:02x?}",
+                    result.data.len(),
+                    attempt,
+                    &result.data[..result.data.len().min(20)]
+                );
                 return Ok(result.data);
             }
             // Intentional thread::sleep — callback transport runs synchronous
@@ -547,7 +589,8 @@ impl CallbackTransport {
             return Err(ThpError::DecryptionError(format!(
                 "CRC32 mismatch: expected {:02x?}, got {:02x?}",
                 computed_crc, received_crc
-            )).into());
+            ))
+            .into());
         }
         Ok(())
     }
@@ -566,13 +609,19 @@ impl CallbackTransport {
             return Err(ThpError::DecryptionError(format!(
                 "Channel mismatch: expected {:02x?}, got {:02x?}",
                 expected_channel, msg_channel
-            )).into());
+            ))
+            .into());
         }
         Ok(())
     }
 
     /// Read response, skipping ACKs and handling continuation packets (for THP)
-    fn read_response(&self, path: &str, max_attempts: u32, expected_channel: Option<&[u8; 2]>) -> Result<Vec<u8>> {
+    fn read_response(
+        &self,
+        path: &str,
+        max_attempts: u32,
+        expected_channel: Option<&[u8; 2]>,
+    ) -> Result<Vec<u8>> {
         let chunk_size = self.callback.get_chunk_size(path) as usize;
 
         for _ in 0..max_attempts {
@@ -580,8 +629,12 @@ impl CallbackTransport {
             let ctrl_byte = first_chunk.get(0).copied().unwrap_or(0);
             let ctrl_type = ctrl_byte & 0xe7;
 
-            log::debug!("[Callback] << Received: ctrl=0x{:02x} (type=0x{:02x}), len={}",
-                ctrl_byte, ctrl_type, first_chunk.len());
+            log::debug!(
+                "[Callback] << Received: ctrl=0x{:02x} (type=0x{:02x}), len={}",
+                ctrl_byte,
+                ctrl_type,
+                first_chunk.len()
+            );
 
             // Validate CRC32 on the received message
             Self::validate_crc(&first_chunk)?;
@@ -606,7 +659,11 @@ impl CallbackTransport {
                     0x05 => "DeviceLocked",
                     _ => "Unknown",
                 };
-                log::error!("[Callback] THP Error: {} (0x{:02x})", error_name, error_code);
+                log::error!(
+                    "[Callback] THP Error: {} (0x{:02x})",
+                    error_name,
+                    error_code
+                );
                 return Err(ThpError::HandshakeFailed(format!("THP Error: {}", error_name)).into());
             }
 
@@ -618,8 +675,11 @@ impl CallbackTransport {
 
                 if total_needed > chunk_size {
                     // Need to read continuation packets
-                    log::debug!("[Callback] Multi-chunk message: need {} bytes, have {}",
-                        total_needed, first_chunk.len());
+                    log::debug!(
+                        "[Callback] Multi-chunk message: need {} bytes, have {}",
+                        total_needed,
+                        first_chunk.len()
+                    );
 
                     let mut full_data = first_chunk.clone();
                     let mut bytes_remaining = total_needed - first_chunk.len();
@@ -637,7 +697,10 @@ impl CallbackTransport {
 
                         // Check if this is a continuation packet (0x80 bit set)
                         if (cont_ctrl & 0x80) != 0x80 {
-                            log::warn!("[Callback] Expected continuation packet, got ctrl=0x{:02x}", cont_ctrl);
+                            log::warn!(
+                                "[Callback] Expected continuation packet, got ctrl=0x{:02x}",
+                                cont_ctrl
+                            );
                             // This might be a new message, handle it
                             break;
                         }
@@ -648,8 +711,11 @@ impl CallbackTransport {
                             let cont_data = &cont_chunk[3..];
                             full_data.extend_from_slice(cont_data);
                             bytes_remaining = bytes_remaining.saturating_sub(cont_data.len());
-                            log::debug!("[Callback] Read continuation: {} bytes, {} remaining",
-                                cont_data.len(), bytes_remaining);
+                            log::debug!(
+                                "[Callback] Read continuation: {} bytes, {} remaining",
+                                cont_data.len(),
+                                bytes_remaining
+                            );
                         }
                     }
 
@@ -675,10 +741,17 @@ impl CallbackTransport {
     async fn perform_thp_handshake(&self, path: &str) -> Result<()> {
         const MAX_RETRIES: usize = 3;
 
-        self.callback.log_debug("HANDSHAKE", &format!("Starting THP handshake with up to {} retries", MAX_RETRIES));
+        self.callback.log_debug(
+            "HANDSHAKE",
+            &format!("Starting THP handshake with up to {} retries", MAX_RETRIES),
+        );
 
         for attempt in 0..MAX_RETRIES {
-            let msg = format!("Attempt {}/{} with stored credentials", attempt + 1, MAX_RETRIES);
+            let msg = format!(
+                "Attempt {}/{} with stored credentials",
+                attempt + 1,
+                MAX_RETRIES
+            );
             log::info!("[Callback] {}", msg);
             self.callback.log_debug("HANDSHAKE", &msg);
 
@@ -692,7 +765,10 @@ impl CallbackTransport {
                 }
                 // Longer delay on later retries to give device time to clean up
                 let delay = if attempt >= 2 { 3000 } else { 2000 };
-                self.callback.log_debug("HANDSHAKE", &format!("Waiting {}ms before reopen...", delay));
+                self.callback.log_debug(
+                    "HANDSHAKE",
+                    &format!("Waiting {}ms before reopen...", delay),
+                );
                 std::thread::sleep(std::time::Duration::from_millis(delay));
 
                 let reopen = self.callback.open_device(path);
@@ -721,7 +797,10 @@ impl CallbackTransport {
                     // retries and go straight to fresh pairing. Retrying with the same
                     // credential just wastes device channel slots.
                     if error_str.contains("CredentialRejected") {
-                        self.callback.log_debug("HANDSHAKE", "Credential rejected — skipping to fresh pairing");
+                        self.callback.log_debug(
+                            "HANDSHAKE",
+                            "Credential rejected — skipping to fresh pairing",
+                        );
                         break;
                     }
 
@@ -741,7 +820,8 @@ impl CallbackTransport {
                         || error_str.contains("Device disconnected");
 
                     if !is_retryable {
-                        self.callback.log_debug("HANDSHAKE", &format!("Non-retryable error: {}", error_str));
+                        self.callback
+                            .log_debug("HANDSHAKE", &format!("Non-retryable error: {}", error_str));
                         return Err(e);
                     }
                 }
@@ -749,8 +829,14 @@ impl CallbackTransport {
         }
 
         // All retries with stored credentials failed — clear and do fresh pairing
-        self.callback.log_debug("HANDSHAKE", "All retries FAILED, clearing credentials for fresh pairing");
-        log::warn!("[Callback] All {} attempts with stored credentials failed, clearing credentials and doing fresh pairing", MAX_RETRIES);
+        self.callback.log_debug(
+            "HANDSHAKE",
+            "All retries FAILED, clearing credentials for fresh pairing",
+        );
+        log::warn!(
+            "[Callback] All {} attempts with stored credentials failed, clearing credentials and doing fresh pairing",
+            MAX_RETRIES
+        );
         self.callback.clear_thp_credential(path);
         let _ = self.callback.close_device(path);
         {
@@ -761,20 +847,39 @@ impl CallbackTransport {
 
         let reopen = self.callback.open_device(path);
         if !reopen.success {
-            log::error!("[Callback] Failed to reopen device for fresh pairing: {}", reopen.error);
+            log::error!(
+                "[Callback] Failed to reopen device for fresh pairing: {}",
+                reopen.error
+            );
             return Err(TransportError::DeviceNotFound.into());
         }
 
         log::info!("[Callback] Starting fresh pairing (credentials cleared)...");
-        self.callback.log_debug("HANDSHAKE", "Starting fresh pairing (credentials cleared)...");
+        self.callback.log_debug(
+            "HANDSHAKE",
+            "Starting fresh pairing (credentials cleared)...",
+        );
         self.perform_thp_handshake_inner(path, true).await
     }
 
     /// Inner THP handshake implementation
     /// - `skip_stored_credentials`: If true, ignore stored credentials and force fresh pairing
-    async fn perform_thp_handshake_inner(&self, path: &str, skip_stored_credentials: bool) -> Result<()> {
-        log::info!("[Callback] Starting THP handshake for BLE device (skip_stored_credentials={})...", skip_stored_credentials);
-        self.callback.log_debug("THP", &format!("Handshake inner start (skip_stored={})", skip_stored_credentials));
+    async fn perform_thp_handshake_inner(
+        &self,
+        path: &str,
+        skip_stored_credentials: bool,
+    ) -> Result<()> {
+        log::info!(
+            "[Callback] Starting THP handshake for BLE device (skip_stored_credentials={})...",
+            skip_stored_credentials
+        );
+        self.callback.log_debug(
+            "THP",
+            &format!(
+                "Handshake inner start (skip_stored={})",
+                skip_stored_credentials
+            ),
+        );
 
         // Try to load stored credentials for reconnection (unless explicitly skipped)
         let stored_credential: Option<StoredCredential> = if skip_stored_credentials {
@@ -804,35 +909,69 @@ impl CallbackTransport {
         // credential matching happens in handle_handshake_init.
         let try_to_unlock = false;
         let has_credentials = stored_credential.is_some();
-        self.callback.log_debug("THP", &format!("try_to_unlock={}, has_credentials={}", try_to_unlock, has_credentials));
-        log::info!("[Callback] try_to_unlock = {} (stored credentials {})",
-            try_to_unlock, if has_credentials { "found" } else { "not found" });
+        self.callback.log_debug(
+            "THP",
+            &format!(
+                "try_to_unlock={}, has_credentials={}",
+                try_to_unlock, has_credentials
+            ),
+        );
+        log::info!(
+            "[Callback] try_to_unlock = {} (stored credentials {})",
+            try_to_unlock,
+            if has_credentials {
+                "found"
+            } else {
+                "not found"
+            }
+        );
 
         // Step 1: Channel Allocation
         let channel_req = encode_channel_allocation_request();
-        self.callback.log_debug("THP", "Sending channel allocation request...");
-        log::debug!("[Callback] Sending channel allocation request ({} bytes)", channel_req.len());
+        self.callback
+            .log_debug("THP", "Sending channel allocation request...");
+        log::debug!(
+            "[Callback] Sending channel allocation request ({} bytes)",
+            channel_req.len()
+        );
         self.write_raw(path, &channel_req)?;
-        self.callback.log_debug("THP", "Channel allocation request sent, reading response...");
+        self.callback.log_debug(
+            "THP",
+            "Channel allocation request sent, reading response...",
+        );
 
         let channel_resp = self.read_response(path, 100, None)?;
-        log::debug!("[Callback] Channel response: {:02x?}", &channel_resp[..channel_resp.len().min(16)]);
+        log::debug!(
+            "[Callback] Channel response: {:02x?}",
+            &channel_resp[..channel_resp.len().min(16)]
+        );
 
         if channel_resp.is_empty() || channel_resp[0] != thp_control::CHANNEL_ALLOCATION_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected channel allocation response, got: {:02x}", channel_resp.get(0).unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected channel allocation response, got: {:02x}",
+                channel_resp.get(0).unwrap_or(&0)
+            ))
+            .into());
         }
 
         // Parse channel from response
         if channel_resp.len() < 15 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Channel allocation response too short: {} bytes", channel_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Channel allocation response too short: {} bytes",
+                channel_resp.len()
+            ))
+            .into());
         }
         let channel: [u8; 2] = [channel_resp[13], channel_resp[14]];
-        log::info!("[Callback] Received allocated channel: {:02x}{:02x}", channel[0], channel[1]);
-        self.callback.log_debug("THP", &format!("Channel allocated: {:02x}{:02x}", channel[0], channel[1]));
+        log::info!(
+            "[Callback] Received allocated channel: {:02x}{:02x}",
+            channel[0],
+            channel[1]
+        );
+        self.callback.log_debug(
+            "THP",
+            &format!("Channel allocated: {:02x}{:02x}", channel[0], channel[1]),
+        );
 
         // Extract device properties
         let payload_len = u16::from_be_bytes([channel_resp[3], channel_resp[4]]) as usize;
@@ -847,10 +986,12 @@ impl CallbackTransport {
         // Create/update BLE state
         {
             let mut states = self.ble_states.write().await;
-            let state = states.entry(path.to_string()).or_insert_with(|| BleDeviceState {
-                protocol: ProtocolThp::new(),
-                handshake_complete: false,
-            });
+            let state = states
+                .entry(path.to_string())
+                .or_insert_with(|| BleDeviceState {
+                    protocol: ProtocolThp::new(),
+                    handshake_complete: false,
+                });
             state.protocol.state_mut().set_channel(channel);
         }
 
@@ -858,17 +999,25 @@ impl CallbackTransport {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Step 2: Handshake Init
-        self.callback.log_debug("THP", "Sending handshake init request...");
+        self.callback
+            .log_debug("THP", "Sending handshake init request...");
         log::debug!("[Callback] Generating ephemeral keypair...");
         let ephemeral_secret: [u8; 32] = rand::random();
-        let (_, host_ephemeral_pubkey) = crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
+        let (_, host_ephemeral_pubkey) =
+            crate::protocol::thp::crypto::keypair_from_secret(&ephemeral_secret);
 
         let send_bit = {
             let states = self.ble_states.read().await;
-            states.get(path).map(|s| s.protocol.state().send_bit()).unwrap_or(0)
+            states
+                .get(path)
+                .map(|s| s.protocol.state().send_bit())
+                .unwrap_or(0)
         };
 
-        log::debug!("[Callback] Sending handshake init request (try_to_unlock={})...", try_to_unlock);
+        log::debug!(
+            "[Callback] Sending handshake init request (try_to_unlock={})...",
+            try_to_unlock
+        );
         let init_req = encode_handshake_init_request(
             &channel,
             host_ephemeral_pubkey.as_bytes(),
@@ -886,15 +1035,24 @@ impl CallbackTransport {
         }
 
         // Read handshake init response
-        self.callback.log_debug("THP", "Waiting for handshake init response...");
+        self.callback
+            .log_debug("THP", "Waiting for handshake init response...");
         let init_resp = self.read_response(path, 100, Some(&channel))?;
-        self.callback.log_debug("THP", &format!("Got handshake init response ({} bytes)", init_resp.len()));
-        log::debug!("[Callback] Handshake init response: {:02x?}", &init_resp[..init_resp.len().min(32)]);
+        self.callback.log_debug(
+            "THP",
+            &format!("Got handshake init response ({} bytes)", init_resp.len()),
+        );
+        log::debug!(
+            "[Callback] Handshake init response: {:02x?}",
+            &init_resp[..init_resp.len().min(32)]
+        );
 
         if init_resp.is_empty() || (init_resp[0] & 0xe7) != thp_control::HANDSHAKE_INIT_RES {
-            return Err(ThpError::HandshakeFailed(
-                format!("Expected handshake init response, got: {:02x}", init_resp.get(0).unwrap_or(&0))
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Expected handshake init response, got: {:02x}",
+                init_resp.get(0).unwrap_or(&0)
+            ))
+            .into());
         }
 
         // Send ACK
@@ -906,16 +1064,20 @@ impl CallbackTransport {
 
         // Parse handshake init response
         if init_resp.len() < 5 + 32 + 48 + 16 {
-            return Err(ThpError::HandshakeFailed(
-                format!("Handshake init response too short: {} bytes", init_resp.len())
-            ).into());
+            return Err(ThpError::HandshakeFailed(format!(
+                "Handshake init response too short: {} bytes",
+                init_resp.len()
+            ))
+            .into());
         }
 
         let payload = &init_resp[5..];
-        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32].try_into()
+        let trezor_ephemeral_pubkey: [u8; 32] = payload[..32]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid ephemeral pubkey".to_string()))?;
         let trezor_encrypted_static = payload[32..80].to_vec();
-        let tag: [u8; 16] = payload[80..96].try_into()
+        let tag: [u8; 16] = payload[80..96]
+            .try_into()
             .map_err(|_| ThpError::HandshakeFailed("Invalid tag".to_string()))?;
 
         // Initialize handshake state
@@ -951,15 +1113,22 @@ impl CallbackTransport {
         // Log whether credential was included in the completion payload.
         // GCM tag alone = 16 bytes; anything larger means a credential was sent.
         let credential_was_sent = completion_req.encrypted_payload.len() > 16;
-        self.callback.log_debug("THP", &format!(
-            "Completion payload: {} bytes (credential_sent={})",
-            completion_req.encrypted_payload.len(), credential_was_sent
-        ));
+        self.callback.log_debug(
+            "THP",
+            &format!(
+                "Completion payload: {} bytes (credential_sent={})",
+                completion_req.encrypted_payload.len(),
+                credential_was_sent
+            ),
+        );
 
         // Step 3: Handshake Completion
         let send_bit = {
             let states = self.ble_states.read().await;
-            states.get(path).map(|s| s.protocol.state().send_bit()).unwrap_or(0)
+            states
+                .get(path)
+                .map(|s| s.protocol.state().send_bit())
+                .unwrap_or(0)
         };
 
         log::debug!("[Callback] Sending handshake completion request...");
@@ -985,10 +1154,20 @@ impl CallbackTransport {
         log::info!("[Callback] ============================================================");
 
         // Read completion response (long timeout for user interaction)
-        self.callback.log_debug("THP", "Waiting for handshake completion response...");
+        self.callback
+            .log_debug("THP", "Waiting for handshake completion response...");
         let comp_resp = self.read_response(path, 600, Some(&channel))?; // 60 seconds
-        self.callback.log_debug("THP", &format!("Got handshake completion response ({} bytes)", comp_resp.len()));
-        log::debug!("[Callback] Handshake completion response: {:02x?}", &comp_resp[..comp_resp.len().min(16)]);
+        self.callback.log_debug(
+            "THP",
+            &format!(
+                "Got handshake completion response ({} bytes)",
+                comp_resp.len()
+            ),
+        );
+        log::debug!(
+            "[Callback] Handshake completion response: {:02x?}",
+            &comp_resp[..comp_resp.len().min(16)]
+        );
 
         // Send ACK
         let ack_bit = (comp_resp[0] >> 4) & 1;
@@ -1010,10 +1189,25 @@ impl CallbackTransport {
                     parse_handshake_completion_response(state.protocol.state(), encrypted_payload)?
                 };
 
-                self.callback.log_debug("THP", &format!("trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)", completion.trezor_state));
-                self.callback.log_debug("THP", &format!("pairing_methods={:?}", completion.pairing_methods));
-                log::info!("[Callback] Device trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)", completion.trezor_state);
-                log::info!("[Callback] Available pairing methods: {:?}", completion.pairing_methods);
+                self.callback.log_debug(
+                    "THP",
+                    &format!(
+                        "trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
+                        completion.trezor_state
+                    ),
+                );
+                self.callback.log_debug(
+                    "THP",
+                    &format!("pairing_methods={:?}", completion.pairing_methods),
+                );
+                log::info!(
+                    "[Callback] Device trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
+                    completion.trezor_state
+                );
+                log::info!(
+                    "[Callback] Available pairing methods: {:?}",
+                    completion.pairing_methods
+                );
 
                 if completion.trezor_state == 0 {
                     if credential_was_sent {
@@ -1022,10 +1216,14 @@ impl CallbackTransport {
                         // Return a specific error so the outer retry loop can skip straight
                         // to fresh pairing with a clean handshake.
                         self.callback.log_debug("THP", "CREDENTIAL REJECTED: sent credential but device returned state=0. Aborting to retry fresh.");
-                        log::warn!("[Callback] Credential rejected by device (state=0 despite sending credential). Will retry fresh.");
+                        log::warn!(
+                            "[Callback] Credential rejected by device (state=0 despite sending credential). Will retry fresh."
+                        );
                         return Err(ThpError::HandshakeFailed(
-                            "CredentialRejected: device returned state=0 despite credential".to_string()
-                        ).into());
+                            "CredentialRejected: device returned state=0 despite credential"
+                                .to_string(),
+                        )
+                        .into());
                     }
                     self.callback.log_debug("THP", "Device requires PAIRING (state=0, no credential sent) - starting pairing flow");
                     log::info!("[Callback] Device requires pairing - starting pairing flow");
@@ -1034,8 +1232,17 @@ impl CallbackTransport {
                     // Device accepted stored credentials (state=1: paired, state=2: autoconnect)
                     // Must send ThpEndRequest to finalize connection before session creation
                     // This matches trezor-suite which ALWAYS sends ThpEndRequest regardless of state
-                    self.callback.log_debug("THP", &format!("Stored credentials ACCEPTED (state={}), finalizing...", completion.trezor_state));
-                    log::info!("[Callback] Device recognized stored credentials (state={}), finalizing connection...", completion.trezor_state);
+                    self.callback.log_debug(
+                        "THP",
+                        &format!(
+                            "Stored credentials ACCEPTED (state={}), finalizing...",
+                            completion.trezor_state
+                        ),
+                    );
+                    log::info!(
+                        "[Callback] Device recognized stored credentials (state={}), finalizing connection...",
+                        completion.trezor_state
+                    );
 
                     // Mark as paired to enable encrypted messaging
                     {
@@ -1047,35 +1254,48 @@ impl CallbackTransport {
 
                     use crate::constants::thp_message_type;
 
-                    let (end_resp_type, _) = self.send_encrypted_message(
-                        path,
-                        &channel,
-                        thp_message_type::THP_END_REQUEST,
-                        &[],
-                    ).await?;
+                    let (end_resp_type, _) = self
+                        .send_encrypted_message(
+                            path,
+                            &channel,
+                            thp_message_type::THP_END_REQUEST,
+                            &[],
+                        )
+                        .await?;
 
                     // state=1 may trigger a ButtonRequest for connection confirmation on the device
                     if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
                         log::info!("[Callback] Device requesting connection confirmation...");
-                        let (ack_resp_type, _) = self.send_encrypted_message(
-                            path,
-                            &channel,
-                            crate::constants::message_type::BUTTON_ACK,
-                            &[],
-                        ).await?;
+                        let (ack_resp_type, _) = self
+                            .send_encrypted_message(
+                                path,
+                                &channel,
+                                crate::constants::message_type::BUTTON_ACK,
+                                &[],
+                            )
+                            .await?;
                         if ack_resp_type != thp_message_type::THP_END_RESPONSE {
-                            return Err(ThpError::HandshakeFailed(
-                                format!("Expected ThpEndResponse after ButtonACK, got: {}", ack_resp_type)
-                            ).into());
+                            return Err(ThpError::HandshakeFailed(format!(
+                                "Expected ThpEndResponse after ButtonACK, got: {}",
+                                ack_resp_type
+                            ))
+                            .into());
                         }
                     } else if end_resp_type != thp_message_type::THP_END_RESPONSE {
-                        return Err(ThpError::HandshakeFailed(
-                            format!("Expected ThpEndResponse, got: {}", end_resp_type)
-                        ).into());
+                        return Err(ThpError::HandshakeFailed(format!(
+                            "Expected ThpEndResponse, got: {}",
+                            end_resp_type
+                        ))
+                        .into());
                     }
 
-                    self.callback.log_debug("THP", "Connection finalized with stored credentials (no re-pairing needed)");
-                    log::info!("[Callback] Connection finalized with stored credentials (no re-pairing needed)");
+                    self.callback.log_debug(
+                        "THP",
+                        "Connection finalized with stored credentials (no re-pairing needed)",
+                    );
+                    log::info!(
+                        "[Callback] Connection finalized with stored credentials (no re-pairing needed)"
+                    );
                 }
             }
         }
@@ -1121,7 +1341,11 @@ impl CallbackTransport {
             encode_encrypted_message(state.protocol.state(), message_type, data)?
         };
 
-        log::debug!("[Callback] Sending encrypted message type {} ({} bytes)", message_type, message.len());
+        log::debug!(
+            "[Callback] Sending encrypted message type {} ({} bytes)",
+            message_type,
+            message.len()
+        );
         self.write_raw(path, &message)?;
 
         // Update state
@@ -1129,7 +1353,10 @@ impl CallbackTransport {
             let mut states = self.ble_states.write().await;
             if let Some(state) = states.get_mut(path) {
                 state.protocol.state_mut().update_sync_bit(true);
-                state.protocol.state_mut().update_nonce(true)
+                state
+                    .protocol
+                    .state_mut()
+                    .update_nonce(true)
                     .map_err(|e| ThpError::EncryptionError(e.to_string()))?;
             }
         }
@@ -1145,8 +1372,11 @@ impl CallbackTransport {
         // Decrypt response
         let (resp_type, resp_data) = {
             if response.len() < 5 {
-                log::error!("[Callback] Response too short: {} bytes, data: {:02x?}",
-                    response.len(), &response[..response.len().min(16)]);
+                log::error!(
+                    "[Callback] Response too short: {} bytes, data: {:02x?}",
+                    response.len(),
+                    &response[..response.len().min(16)]
+                );
                 return Err(ThpError::DecryptionError("Response too short".to_string()).into());
             }
 
@@ -1154,16 +1384,29 @@ impl CallbackTransport {
             let crc_len = 4;
             let header_len = 5;
 
-            log::debug!("[Callback] Response: len={}, payload_len={}, header_len={}, crc_len={}",
-                response.len(), payload_len, header_len, crc_len);
+            log::debug!(
+                "[Callback] Response: len={}, payload_len={}, header_len={}, crc_len={}",
+                response.len(),
+                payload_len,
+                header_len,
+                crc_len
+            );
 
             if payload_len <= crc_len || response.len() < header_len + payload_len {
-                log::error!("[Callback] Invalid payload: response_len={}, payload_len={}, needed={}, data: {:02x?}",
-                    response.len(), payload_len, header_len + payload_len, &response[..response.len().min(32)]);
+                log::error!(
+                    "[Callback] Invalid payload: response_len={}, payload_len={}, needed={}, data: {:02x?}",
+                    response.len(),
+                    payload_len,
+                    header_len + payload_len,
+                    &response[..response.len().min(32)]
+                );
                 return Err(ThpError::DecryptionError(format!(
                     "Invalid payload: response_len={}, payload_len={}, needed={}",
-                    response.len(), payload_len, header_len + payload_len
-                )).into());
+                    response.len(),
+                    payload_len,
+                    header_len + payload_len
+                ))
+                .into());
             }
 
             let encrypted_payload = &response[header_len..header_len + payload_len - crc_len];
@@ -1171,20 +1414,29 @@ impl CallbackTransport {
             let states = self.ble_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
 
-            let creds = state.protocol.state().handshake_credentials()
+            let creds = state
+                .protocol
+                .state()
+                .handshake_credentials()
                 .ok_or(ThpError::StateMissing)?;
 
-            let key: [u8; 32] = creds.trezor_key.clone().try_into()
+            let key: [u8; 32] = creds
+                .trezor_key
+                .clone()
+                .try_into()
                 .map_err(|_| ThpError::DecryptionError("Invalid key".to_string()))?;
 
             let recv_nonce = state.protocol.state().recv_nonce();
             let iv = crate::protocol::thp::crypto::get_iv_from_nonce(recv_nonce);
             let aad: &[u8] = &[];
 
-            let decrypted = crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, aad, encrypted_payload)?;
+            let decrypted =
+                crate::protocol::thp::crypto::aes_gcm_decrypt(&key, &iv, aad, encrypted_payload)?;
 
             if decrypted.len() < 3 {
-                return Err(ThpError::DecryptionError("Decrypted payload too short".to_string()).into());
+                return Err(
+                    ThpError::DecryptionError("Decrypted payload too short".to_string()).into(),
+                );
             }
 
             let _session_id = decrypted[0];
@@ -1199,20 +1451,27 @@ impl CallbackTransport {
             let mut states = self.ble_states.write().await;
             if let Some(state) = states.get_mut(path) {
                 state.protocol.state_mut().update_sync_bit(false);
-                state.protocol.state_mut().update_nonce(false)
+                state
+                    .protocol
+                    .state_mut()
+                    .update_nonce(false)
                     .map_err(|e| ThpError::DecryptionError(e.to_string()))?;
             }
         }
 
-        log::debug!("[Callback] Received encrypted response type {} ({} bytes)", resp_type, resp_data.len());
+        log::debug!(
+            "[Callback] Received encrypted response type {} ({} bytes)",
+            resp_type,
+            resp_data.len()
+        );
         Ok((resp_type, resp_data))
     }
 
     /// Perform pairing flow
     async fn perform_pairing(&self, path: &str, channel: &[u8; 2]) -> Result<()> {
         use crate::constants::{message_type, thp_message_type, thp_pairing_method};
-        use crate::protocol::thp::pairing_messages::*;
         use crate::protocol::thp::pairing::{get_cpace_host_keys, get_shared_secret};
+        use crate::protocol::thp::pairing_messages::*;
 
         log::info!("[Callback] Starting pairing flow...");
 
@@ -1228,29 +1487,30 @@ impl CallbackTransport {
         let pairing_request = encode_pairing_request(&self.host_name, &self.app_name);
         log::info!("[Callback] Sending pairing request...");
 
-        let (mut resp_type, _) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_PAIRING_REQUEST,
-            &pairing_request,
-        ).await?;
+        let (mut resp_type, _) = self
+            .send_encrypted_message(
+                path,
+                channel,
+                thp_message_type::THP_PAIRING_REQUEST,
+                &pairing_request,
+            )
+            .await?;
 
         // Handle ButtonRequest
         if resp_type == message_type::BUTTON_REQUEST {
             log::info!("[Callback] >>> CONFIRM PAIRING ON YOUR TREZOR SCREEN! <<<");
-            let (next_type, _) = self.send_encrypted_message(
-                path,
-                channel,
-                message_type::BUTTON_ACK,
-                &[],
-            ).await?;
+            let (next_type, _) = self
+                .send_encrypted_message(path, channel, message_type::BUTTON_ACK, &[])
+                .await?;
             resp_type = next_type;
         }
 
         if resp_type != thp_message_type::THP_PAIRING_REQUEST_APPROVED {
             return Err(ThpError::PairingFailed(format!(
-                "Expected ThpPairingRequestApproved, got {}", resp_type
-            )).into());
+                "Expected ThpPairingRequestApproved, got {}",
+                resp_type
+            ))
+            .into());
         }
         log::info!("[Callback] Pairing request approved!");
 
@@ -1258,12 +1518,14 @@ impl CallbackTransport {
         let select_method = encode_select_method(thp_pairing_method::CODE_ENTRY);
         log::info!("[Callback] Selecting code entry pairing method...");
 
-        let (resp_type, commitment_data) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_SELECT_METHOD,
-            &select_method,
-        ).await?;
+        let (resp_type, commitment_data) = self
+            .send_encrypted_message(
+                path,
+                channel,
+                thp_message_type::THP_SELECT_METHOD,
+                &select_method,
+            )
+            .await?;
 
         // Generate a single challenge to reuse throughout the pairing flow
         // (must use the SAME challenge for both sends, matching bluetooth.rs)
@@ -1272,12 +1534,14 @@ impl CallbackTransport {
 
         // Handle response flow
         let commitment_data = if resp_type == thp_message_type::THP_PAIRING_PREPARATIONS_FINISHED {
-            let (resp_type, commitment_data) = self.send_encrypted_message(
-                path,
-                channel,
-                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-                &challenge_payload,
-            ).await?;
+            let (resp_type, commitment_data) = self
+                .send_encrypted_message(
+                    path,
+                    channel,
+                    thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                    &challenge_payload,
+                )
+                .await?;
             if resp_type != thp_message_type::THP_CODE_ENTRY_COMMITMENT {
                 return Err(ThpError::PairingFailed("Expected commitment".to_string()).into());
             }
@@ -1285,7 +1549,9 @@ impl CallbackTransport {
         } else if resp_type == thp_message_type::THP_CODE_ENTRY_COMMITMENT {
             commitment_data
         } else {
-            return Err(ThpError::PairingFailed(format!("Unexpected response: {}", resp_type)).into());
+            return Err(
+                ThpError::PairingFailed(format!("Unexpected response: {}", resp_type)).into(),
+            );
         };
 
         // Decode and store commitment + challenge in handshake credentials for later validation
@@ -1301,12 +1567,14 @@ impl CallbackTransport {
         }
 
         // Step 3: Get CPACE Trezor pubkey (reuse the same challenge)
-        let (resp_type, cpace_data) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_CODE_ENTRY_CHALLENGE,
-            &challenge_payload,
-        ).await?;
+        let (resp_type, cpace_data) = self
+            .send_encrypted_message(
+                path,
+                channel,
+                thp_message_type::THP_CODE_ENTRY_CHALLENGE,
+                &challenge_payload,
+            )
+            .await?;
 
         if resp_type != thp_message_type::THP_CODE_ENTRY_CPACE_TREZOR {
             return Err(ThpError::PairingFailed("Expected CPACE Trezor".to_string()).into());
@@ -1332,7 +1600,8 @@ impl CallbackTransport {
         // Step 5: Generate CPACE keys
         let handshake_hash = {
             let states = self.ble_states.read().await;
-            states.get(path)
+            states
+                .get(path)
                 .and_then(|s| s.protocol.state().handshake_credentials())
                 .map(|c| c.handshake_hash.clone())
                 .unwrap_or_default()
@@ -1346,19 +1615,23 @@ impl CallbackTransport {
         let cpace_host_tag = encode_cpace_host_tag(&cpace_keys.public_key, tag);
         log::info!("[Callback] Sending CPACE host tag...");
 
-        let (resp_type, secret_data) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
-            &cpace_host_tag,
-        ).await?;
+        let (resp_type, secret_data) = self
+            .send_encrypted_message(
+                path,
+                channel,
+                thp_message_type::THP_CODE_ENTRY_CPACE_HOST_TAG,
+                &cpace_host_tag,
+            )
+            .await?;
 
         if resp_type == message_type::FAILURE {
             return Err(ThpError::PairingFailed("Code verification failed".to_string()).into());
         }
 
         if resp_type != thp_message_type::THP_CODE_ENTRY_SECRET {
-            return Err(ThpError::PairingFailed(format!("Expected secret, got {}", resp_type)).into());
+            return Err(
+                ThpError::PairingFailed(format!("Expected secret, got {}", resp_type)).into(),
+            );
         }
 
         // Validate the code entry tag: verify commitment matches the secret
@@ -1368,11 +1641,7 @@ impl CallbackTransport {
             let states = self.ble_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
             if let Some(creds) = state.protocol.state().handshake_credentials() {
-                crate::protocol::thp::pairing::validate_code_entry_tag(
-                    creds,
-                    &code,
-                    &secret,
-                )?;
+                crate::protocol::thp::pairing::validate_code_entry_tag(creds, &code, &secret)?;
                 log::info!("[Callback] Code entry tag validated successfully!");
             } else {
                 return Err(ThpError::StateMissing.into());
@@ -1383,7 +1652,8 @@ impl CallbackTransport {
         // Step 7: Request credential
         let host_static_pubkey = {
             let states = self.ble_states.read().await;
-            states.get(path)
+            states
+                .get(path)
                 .and_then(|s| s.protocol.state().handshake_credentials())
                 .map(|c| c.host_static_public_key.clone())
                 .unwrap_or_default()
@@ -1392,34 +1662,39 @@ impl CallbackTransport {
         let credential_request = encode_credential_request(&host_static_pubkey, false, None);
         log::info!("[Callback] Sending credential request...");
 
-        let (mut resp_type, mut credential_data) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_CREDENTIAL_REQUEST,
-            &credential_request,
-        ).await?;
-
-        if resp_type == message_type::BUTTON_REQUEST {
-            let (next_type, next_data) = self.send_encrypted_message(
+        let (mut resp_type, mut credential_data) = self
+            .send_encrypted_message(
                 path,
                 channel,
-                message_type::BUTTON_ACK,
-                &[],
-            ).await?;
+                thp_message_type::THP_CREDENTIAL_REQUEST,
+                &credential_request,
+            )
+            .await?;
+
+        if resp_type == message_type::BUTTON_REQUEST {
+            let (next_type, next_data) = self
+                .send_encrypted_message(path, channel, message_type::BUTTON_ACK, &[])
+                .await?;
             resp_type = next_type;
             credential_data = next_data;
         }
 
         if resp_type != thp_message_type::THP_CREDENTIAL_RESPONSE {
-            return Err(ThpError::PairingFailed(format!("Expected credential response, got {}", resp_type)).into());
+            return Err(ThpError::PairingFailed(format!(
+                "Expected credential response, got {}",
+                resp_type
+            ))
+            .into());
         }
         log::info!("[Callback] Received credential!");
 
         // Parse and save credentials for reconnection
-        if let Ok((trezor_static_pubkey, credential)) = decode_credential_response(&credential_data) {
+        if let Ok((trezor_static_pubkey, credential)) = decode_credential_response(&credential_data)
+        {
             let host_static_key = {
                 let states = self.ble_states.read().await;
-                states.get(path)
+                states
+                    .get(path)
                     .and_then(|s| s.protocol.state().handshake_credentials())
                     .map(|c| c.static_key.clone())
                     .unwrap_or_default()
@@ -1441,8 +1716,11 @@ impl CallbackTransport {
                     }
                 }
             } else {
-                log::warn!("[Callback] Invalid key lengths, not saving credentials: host={}, trezor={}",
-                    host_static_key.len(), trezor_static_pubkey.len());
+                log::warn!(
+                    "[Callback] Invalid key lengths, not saving credentials: host={}, trezor={}",
+                    host_static_key.len(),
+                    trezor_static_pubkey.len()
+                );
             }
         } else {
             log::warn!("[Callback] Failed to parse credential response, not saving credentials");
@@ -1450,12 +1728,9 @@ impl CallbackTransport {
 
         // Step 8: Send ThpEndRequest
         log::info!("[Callback] Sending ThpEndRequest...");
-        let (end_resp_type, _) = self.send_encrypted_message(
-            path,
-            channel,
-            thp_message_type::THP_END_REQUEST,
-            &[],
-        ).await?;
+        let (end_resp_type, _) = self
+            .send_encrypted_message(path, channel, thp_message_type::THP_END_REQUEST, &[])
+            .await?;
 
         if end_resp_type != thp_message_type::THP_END_RESPONSE {
             return Err(ThpError::PairingFailed("Expected ThpEndResponse".to_string()).into());
@@ -1497,24 +1772,23 @@ impl CallbackTransport {
             self.session_on_device,
         );
 
-        let (mut resp_type, mut resp_data) = self.send_encrypted_message(
-            path,
-            channel,
-            THP_CREATE_NEW_SESSION,
-            &session_payload,
-        ).await?;
+        let (mut resp_type, mut resp_data) = self
+            .send_encrypted_message(path, channel, THP_CREATE_NEW_SESSION, &session_payload)
+            .await?;
 
         // The device may emit one or more ButtonRequests before completing —
         // e.g. confirming the passphrase, or showing its on-device keyboard.
         // Acknowledge each until the device returns the final Success/Failure.
         while resp_type == crate::constants::message_type::BUTTON_REQUEST {
             log::debug!("[Callback] ThpCreateNewSession: ButtonRequest, acking");
-            let (next_type, next_data) = self.send_encrypted_message(
-                path,
-                channel,
-                crate::constants::message_type::BUTTON_ACK,
-                &[],
-            ).await?;
+            let (next_type, next_data) = self
+                .send_encrypted_message(
+                    path,
+                    channel,
+                    crate::constants::message_type::BUTTON_ACK,
+                    &[],
+                )
+                .await?;
             resp_type = next_type;
             resp_data = next_data;
         }
@@ -1533,19 +1807,15 @@ impl CallbackTransport {
     }
 
     /// Send THP encrypted call (for post-handshake communication)
-    async fn thp_call(
-        &self,
-        path: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+    async fn thp_call(&self, path: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)> {
         let channel = {
             let states = self.ble_states.read().await;
             let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
             *state.protocol.state().channel()
         };
 
-        self.send_encrypted_message(path, &channel, message_type, data).await
+        self.send_encrypted_message(path, &channel, message_type, data)
+            .await
     }
 }
 
@@ -1583,14 +1853,17 @@ impl Transport for CallbackTransport {
         // Open the device
         let result = self.callback.open_device(path);
         if !result.success {
-            log::error!("[Callback] open_device failed for {}: {}", path, result.error);
-            return Err(TransportError::UnableToOpen(
-                if result.error.is_empty() {
-                    format!("Failed to open device: {}", path)
-                } else {
-                    result.error
-                }
-            ).into());
+            log::error!(
+                "[Callback] open_device failed for {}: {}",
+                path,
+                result.error
+            );
+            return Err(TransportError::UnableToOpen(if result.error.is_empty() {
+                format!("Failed to open device: {}", path)
+            } else {
+                result.error
+            })
+            .into());
         }
 
         let is_ble = self.is_ble_device(path).await;
@@ -1599,7 +1872,10 @@ impl Transport for CallbackTransport {
         if is_ble {
             let needs_handshake = {
                 let states = self.ble_states.read().await;
-                !states.get(path).map(|s| s.handshake_complete).unwrap_or(false)
+                !states
+                    .get(path)
+                    .map(|s| s.handshake_complete)
+                    .unwrap_or(false)
             };
 
             if needs_handshake {
@@ -1618,7 +1894,10 @@ impl Transport for CallbackTransport {
                         log::debug!("[Callback] USB device uses V1 protocol");
                     }
                     Err(e) => {
-                        log::warn!("[Callback] THP detection failed ({}), falling back to V1", e);
+                        log::warn!(
+                            "[Callback] THP detection failed ({}), falling back to V1",
+                            e
+                        );
                     }
                 }
             }
@@ -1649,12 +1928,7 @@ impl Transport for CallbackTransport {
             .map_err(|e| TransportError::DataTransfer(e.to_string()).into())
     }
 
-    async fn call(
-        &self,
-        session: &str,
-        message_type: u16,
-        data: &[u8],
-    ) -> Result<(u16, Vec<u8>)> {
+    async fn call(&self, session: &str, message_type: u16, data: &[u8]) -> Result<(u16, Vec<u8>)> {
         let path = self
             .sessions
             .get_path(session)
@@ -1668,16 +1942,23 @@ impl Transport for CallbackTransport {
         if self.needs_thp(&path).await {
             let is_paired = {
                 let states = self.ble_states.read().await;
-                states.get(&path).map(|s| s.protocol.state().is_paired()).unwrap_or(false)
+                states
+                    .get(&path)
+                    .map(|s| s.protocol.state().is_paired())
+                    .unwrap_or(false)
             };
 
             if is_paired {
-                log::debug!("[Callback] Using THP encrypted call for message type {}", message_type);
+                log::debug!(
+                    "[Callback] Using THP encrypted call for message type {}",
+                    message_type
+                );
                 return self.thp_call(&path, message_type, data).await;
             } else {
                 return Err(TransportError::DataTransfer(
-                    "THP device not paired - handshake required".to_string()
-                ).into());
+                    "THP device not paired - handshake required".to_string(),
+                )
+                .into());
             }
         }
 
@@ -1698,7 +1979,10 @@ impl Transport for CallbackTransport {
         }
 
         // Fall back to Protocol V1 chunk-based communication (for USB only)
-        log::debug!("[Callback] Using Protocol V1 for USB device, message_type={}", message_type);
+        log::debug!(
+            "[Callback] Using Protocol V1 for USB device, message_type={}",
+            message_type
+        );
 
         // Get chunk size for this device
         let chunk_size = self.callback.get_chunk_size(&path) as usize;
@@ -1775,8 +2059,9 @@ impl Transport for CallbackTransport {
             }
         }
 
-        let first_chunk = first_chunk
-            .ok_or_else(|| TransportError::DataTransfer("No Protocol v1 header found".to_string()))?;
+        let first_chunk = first_chunk.ok_or_else(|| {
+            TransportError::DataTransfer("No Protocol v1 header found".to_string())
+        })?;
 
         let decoded = protocol.decode(&first_chunk)?;
         log::debug!(
