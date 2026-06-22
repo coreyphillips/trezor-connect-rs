@@ -203,6 +203,28 @@ pub enum DeviceError {
     InvalidInput(String),
 }
 
+impl DeviceError {
+    /// Map a Trezor protocol `Failure` (a `FailureType` code plus message) into
+    /// a typed `DeviceError`. Known PIN/action codes become their typed
+    /// variants so callers (and downstream FFI consumers) can react to a wrong
+    /// PIN, a cancelled PIN entry, etc.; unknown codes fall back to the generic
+    /// `DeviceError` so existing behavior is preserved.
+    ///
+    /// Codes match `FailureType` in `proto/messages-common.proto`.
+    pub fn from_failure(code: Option<i32>, message: String) -> Self {
+        match code {
+            Some(7) => DeviceError::InvalidPin,      // Failure_PinInvalid
+            Some(6) => DeviceError::PinCancelled,    // Failure_PinCancelled
+            Some(5) => DeviceError::PinRequired,     // Failure_PinExpected
+            Some(4) => DeviceError::ActionCancelled, // Failure_ActionCancelled
+            other => DeviceError::DeviceError {
+                code: other.unwrap_or(0),
+                message,
+            },
+        }
+    }
+}
+
 /// THP (Trezor Host Protocol) specific errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -319,5 +341,70 @@ impl From<prost::DecodeError> for ProtocolError {
 impl From<prost::EncodeError> for ProtocolError {
     fn from(err: prost::EncodeError) -> Self {
         ProtocolError::ProtobufEncode(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_failure_maps_pin_invalid() {
+        // Failure_PinInvalid = 7 -> wrong PIN entered
+        assert!(matches!(
+            DeviceError::from_failure(Some(7), "invalid pin".to_string()),
+            DeviceError::InvalidPin
+        ));
+    }
+
+    #[test]
+    fn from_failure_maps_pin_cancelled() {
+        // Failure_PinCancelled = 6
+        assert!(matches!(
+            DeviceError::from_failure(Some(6), "cancelled".to_string()),
+            DeviceError::PinCancelled
+        ));
+    }
+
+    #[test]
+    fn from_failure_maps_pin_expected() {
+        // Failure_PinExpected = 5 -> PIN required
+        assert!(matches!(
+            DeviceError::from_failure(Some(5), "pin expected".to_string()),
+            DeviceError::PinRequired
+        ));
+    }
+
+    #[test]
+    fn from_failure_maps_action_cancelled() {
+        // Failure_ActionCancelled = 4
+        assert!(matches!(
+            DeviceError::from_failure(Some(4), "action cancelled".to_string()),
+            DeviceError::ActionCancelled
+        ));
+    }
+
+    #[test]
+    fn from_failure_unknown_code_stays_generic() {
+        // Unknown code (e.g. Failure_FirmwareError = 99) falls back to generic,
+        // preserving both the code and the message.
+        match DeviceError::from_failure(Some(99), "boom".to_string()) {
+            DeviceError::DeviceError { code, message } => {
+                assert_eq!(code, 99);
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected generic DeviceError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_failure_missing_code_stays_generic() {
+        match DeviceError::from_failure(None, "no code".to_string()) {
+            DeviceError::DeviceError { code, message } => {
+                assert_eq!(code, 0);
+                assert_eq!(message, "no code");
+            }
+            other => panic!("expected generic DeviceError, got {other:?}"),
+        }
     }
 }
