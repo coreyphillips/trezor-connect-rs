@@ -77,10 +77,10 @@ impl<T: Transport> TrezorClient<T> {
                 Ok(MessageType::Failure) => {
                     let failure = protos::common::Failure::decode(current_data.as_slice())
                         .map_err(|e| DeviceError::ProtobufDecode(e.to_string()))?;
-                    return Err(DeviceError::DeviceError {
-                        code: failure.code.unwrap_or(0),
-                        message: failure.message.unwrap_or_default(),
-                    }
+                    return Err(DeviceError::from_failure(
+                        failure.code,
+                        failure.message.unwrap_or_default(),
+                    )
                     .into());
                 }
                 Ok(MessageType::ButtonRequest) => {
@@ -452,10 +452,10 @@ impl<T: Transport> TrezorClient<T> {
             if let Ok(MessageType::Failure) = MessageType::try_from(resp_type as i32) {
                 let failure = protos::common::Failure::decode(resp_data.as_slice())
                     .map_err(|e| DeviceError::ProtobufDecode(e.to_string()))?;
-                return Err(DeviceError::DeviceError {
-                    code: failure.code.unwrap_or(0),
-                    message: failure.message.unwrap_or_default(),
-                }
+                return Err(DeviceError::from_failure(
+                    failure.code,
+                    failure.message.unwrap_or_default(),
+                )
                 .into());
             }
 
