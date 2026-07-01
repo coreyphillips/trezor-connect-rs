@@ -237,6 +237,12 @@ pub enum ThpError {
     #[error("Handshake failed: {0}")]
     HandshakeFailed(String),
 
+    /// Device is locked; the THP handshake cannot complete until the user
+    /// unlocks the device. Callers should back off and prompt the user to
+    /// unlock rather than retrying the transport in a tight loop.
+    #[error("THP handshake failed: DeviceLocked")]
+    DeviceLocked,
+
     /// Pairing required
     #[error("Pairing required")]
     PairingRequired,
@@ -406,5 +412,18 @@ mod tests {
             }
             other => panic!("expected generic DeviceError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn device_locked_wraps_into_thp_error() {
+        let err: TrezorError = ThpError::DeviceLocked.into();
+        assert!(matches!(err, TrezorError::Thp(ThpError::DeviceLocked)));
+    }
+
+    #[test]
+    fn device_locked_display_keeps_devicelocked_substring() {
+        // bitkit-core (and downstream apps) may still substring-match on
+        // "DeviceLocked"; keep that guarantee stable.
+        assert!(ThpError::DeviceLocked.to_string().contains("DeviceLocked"));
     }
 }
