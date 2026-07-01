@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
 use crate::constants::{PROTOCOL_V1_HEADER_SIZE, thp_control};
-use crate::error::{Result, ThpError, TransportError};
+use crate::error::{Result, ThpError, TransportError, TrezorError};
 use crate::protocol::Protocol;
 use crate::protocol::chunk;
 use crate::protocol::thp::{
@@ -664,6 +664,13 @@ impl CallbackTransport {
                     error_name,
                     error_code
                 );
+                // DeviceLocked is a distinct, typed state: the device needs to be
+                // unlocked before the handshake can proceed. Surfacing it as a
+                // dedicated variant lets perform_thp_handshake back off (one
+                // try_to_unlock retry) instead of churning the transport.
+                if error_code == 0x05 {
+                    return Err(ThpError::DeviceLocked.into());
+                }
                 return Err(ThpError::HandshakeFailed(format!("THP Error: {}", error_name)).into());
             }
 
@@ -780,7 +787,7 @@ impl CallbackTransport {
                 }
             }
 
-            match self.perform_thp_handshake_inner(path, false).await {
+            match self.perform_thp_handshake_inner(path, false, false).await {
                 Ok(()) => {
                     let msg = format!("Handshake succeeded on attempt {}", attempt + 1);
                     log::info!("[Callback] {}", msg);
@@ -792,6 +799,37 @@ impl CallbackTransport {
                     let msg = format!("Attempt {} FAILED: {}", attempt + 1, error_str);
                     log::warn!("[Callback] {}", msg);
                     self.callback.log_debug("HANDSHAKE", &msg);
+
+                    // A locked device is NOT a transient transport failure, so it must
+                    // not enter the close/sleep/reopen churn loop (that keeps the device
+                    // busy — see bitkit-ios#613 / bitkit-android#1030). Suite parity: do
+                    // one clean reopen, then a single handshake with try_to_unlock=true so
+                    // the *device* prompts the user to unlock. Whatever that attempt
+                    // returns — success, or DeviceLocked again if the user declined — is
+                    // surfaced to the caller, which owns any further back-off.
+                    if matches!(&e, TrezorError::Thp(ThpError::DeviceLocked)) {
+                        self.callback.log_debug(
+                            "HANDSHAKE",
+                            "Device locked — retrying once with try_to_unlock (no reopen churn)",
+                        );
+                        log::info!(
+                            "[Callback] Device locked; retrying handshake once with try_to_unlock=true"
+                        );
+                        let _ = self.callback.close_device(path);
+                        {
+                            let mut states = self.ble_states.write().await;
+                            states.remove(path);
+                        }
+                        let reopen = self.callback.open_device(path);
+                        if !reopen.success {
+                            log::error!(
+                                "[Callback] Failed to reopen device for unlock retry: {}",
+                                reopen.error
+                            );
+                            return Err(TransportError::DeviceNotFound.into());
+                        }
+                        return self.perform_thp_handshake_inner(path, false, true).await;
+                    }
 
                     // If the device explicitly rejected our credential, skip remaining
                     // retries and go straight to fresh pairing. Retrying with the same
@@ -814,7 +852,11 @@ impl CallbackTransport {
                         || error_str.contains("Unexpected response")
                         || error_str.contains("Timed out")
                         || error_str.contains("Pairing failed")
-                        || error_str.contains("THP Error")
+                        // Transient THP errors worth a reopen+retry. DeviceLocked is
+                        // deliberately excluded (handled above); the previous broad
+                        // `contains("THP Error")` also matched it and drove the churn.
+                        || error_str.contains("TransportBusy")
+                        || error_str.contains("UnallocatedChannel")
                         || error_str.contains("Read timeout")
                         || error_str.contains("Write failed")
                         || error_str.contains("Device disconnected");
@@ -859,15 +901,19 @@ impl CallbackTransport {
             "HANDSHAKE",
             "Starting fresh pairing (credentials cleared)...",
         );
-        self.perform_thp_handshake_inner(path, true).await
+        self.perform_thp_handshake_inner(path, true, false).await
     }
 
     /// Inner THP handshake implementation
     /// - `skip_stored_credentials`: If true, ignore stored credentials and force fresh pairing
+    /// - `try_to_unlock`: If true, ask the device to prompt the user to unlock as
+    ///   part of the handshake. Suite only sets this on a retry after the device
+    ///   reported ThpDeviceLocked.
     async fn perform_thp_handshake_inner(
         &self,
         path: &str,
         skip_stored_credentials: bool,
+        try_to_unlock: bool,
     ) -> Result<()> {
         log::info!(
             "[Callback] Starting THP handshake for BLE device (skip_stored_credentials={})...",
@@ -903,11 +949,11 @@ impl CallbackTransport {
                 })
         };
 
-        // Match Trezor Suite: try_to_unlock is false by default.
-        // Suite only sets it true on retry after ThpDeviceLocked.
-        // Stored credentials are used regardless of this flag —
-        // credential matching happens in handle_handshake_init.
-        let try_to_unlock = false;
+        // Match Trezor Suite: try_to_unlock is false by default and only set
+        // true on a retry after the device reported ThpDeviceLocked (see the
+        // DeviceLocked branch in perform_thp_handshake). Stored credentials are
+        // used regardless of this flag — credential matching happens in
+        // handle_handshake_init.
         let has_credentials = stored_credential.is_some();
         self.callback.log_debug(
             "THP",
@@ -1034,10 +1080,13 @@ impl CallbackTransport {
             }
         }
 
-        // Read handshake init response
+        // Read handshake init response. When try_to_unlock is set the device
+        // prompts the user to unlock before replying, so allow the full 60s
+        // user-interaction budget instead of the default ~10s.
         self.callback
             .log_debug("THP", "Waiting for handshake init response...");
-        let init_resp = self.read_response(path, 100, Some(&channel))?;
+        let init_read_attempts = if try_to_unlock { 600 } else { 100 };
+        let init_resp = self.read_response(path, init_read_attempts, Some(&channel))?;
         self.callback.log_debug(
             "THP",
             &format!("Got handshake init response ({} bytes)", init_resp.len()),

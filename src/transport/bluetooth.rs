@@ -455,6 +455,9 @@ impl BluetoothTransport {
                 0x05 => "DeviceLocked",
                 _ => "Unknown",
             };
+            if error_code == 0x05 {
+                return Err(ThpError::DeviceLocked.into());
+            }
             return Err(ThpError::HandshakeFailed(format!(
                 "Device returned THP error: {} (0x{:02x})",
                 error_name, error_code
