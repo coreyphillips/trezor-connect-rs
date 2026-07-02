@@ -116,9 +116,11 @@ pub(crate) mod passphrase;
 // Static session id derivation + wrong-passphrase detection
 pub mod session_state;
 
-// PSBT support (optional, requires `psbt` feature)
-#[cfg(feature = "psbt")]
+// PSBT support (always available; the `psbt` feature is a no-op alias)
 pub mod psbt;
+
+// Bitcoin helpers shared by validation and verification (crate-internal)
+pub(crate) mod bitcoin_utils;
 
 // Re-export error types
 pub use error::{Result, TrezorError};

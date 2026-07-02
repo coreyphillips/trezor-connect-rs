@@ -711,7 +711,9 @@ impl<T: Transport> TrezorClient<T> {
             prev_hash: input.prev_hash.clone(),
             prev_index: input.prev_index,
             script_sig: None,
-            sequence: input.sequence.or(Some(0xFFFFFFFD)), // RBF enabled by default
+            // Omitted when unset so firmware applies its 0xFFFFFFFF default,
+            // matching @trezor/connect. Callers wanting RBF set 0xFFFFFFFD.
+            sequence: input.sequence,
             script_type: Some(input.script_type as i32),
             multisig: None,
             amount: Some(input.amount),

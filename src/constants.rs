@@ -276,3 +276,8 @@ pub const BIP86_PURPOSE: u32 = 86;
 
 /// Hardened key offset (2^31)
 pub const HARDENED_OFFSET: u32 = 0x80000000;
+
+/// Bitcoin dust limit in satoshis. Transactions whose total spendable output
+/// value is below this are rejected client-side before reaching the device,
+/// matching `@trezor/connect`'s "Total amount is below dust limit" check.
+pub const DUST_LIMIT_SATOSHIS: u64 = 546;
