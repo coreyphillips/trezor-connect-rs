@@ -45,6 +45,9 @@ pub struct SignMessageParams {
     pub coin: Option<Network>,
     /// If true, don't include script type in the signature
     pub no_script_type: bool,
+    /// Display the address in chunks of 4 characters on the device
+    /// (firmware 2.6.3+)
+    pub chunkify: Option<bool>,
 }
 
 /// Parameters for verifying a message signature.
@@ -58,6 +61,9 @@ pub struct VerifyMessageParams {
     pub message: String,
     /// Coin network (default: Bitcoin)
     pub coin: Option<Network>,
+    /// Display the address in chunks of 4 characters on the device
+    /// (firmware 2.6.3+)
+    pub chunkify: Option<bool>,
 }
 
 /// Multisig configuration.
@@ -111,7 +117,9 @@ pub struct SignTxInput {
     pub amount: u64,
     /// Script type
     pub script_type: ScriptType,
-    /// Sequence number (default: 0xFFFFFFFD for RBF)
+    /// Sequence number. Omitted when unset, so firmware applies its
+    /// 0xFFFFFFFF (final) default, matching @trezor/connect. Set 0xFFFFFFFD
+    /// to opt in to RBF.
     pub sequence: Option<u32>,
     /// Original transaction hash for RBF replacement (hex encoded)
     pub orig_hash: Option<String>,

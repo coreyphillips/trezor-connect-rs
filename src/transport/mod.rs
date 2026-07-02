@@ -7,6 +7,9 @@ pub mod callback;
 pub mod session;
 pub mod traits;
 
+#[cfg(test)]
+pub(crate) mod mock;
+
 #[cfg(feature = "usb")]
 pub mod usb;
 

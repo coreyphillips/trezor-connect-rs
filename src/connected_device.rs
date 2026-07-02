@@ -301,6 +301,21 @@ impl ConnectedDevice {
         let script_type = infer_script_type(&address_n);
         let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
+        // Model One firmware rejects messages over 1024 bytes; fail fast like
+        // JS validateModelOneMessageSize does.
+        if self
+            .features
+            .as_ref()
+            .and_then(|f| f.major_version)
+            .is_some_and(|v| v == 1)
+            && params.message.len() > 1024
+        {
+            return Err(DeviceError::NotSupported(
+                "Message exceeds the 1024-byte Trezor Model One limit".to_string(),
+            )
+            .into());
+        }
+
         let request = protos::bitcoin::SignMessage {
             address_n,
             message: params.message.as_bytes().to_vec(),
@@ -311,7 +326,7 @@ impl ConnectedDevice {
             } else {
                 None
             },
-            chunkify: None,
+            chunkify: params.chunkify,
         };
 
         let (resp_type, resp_data) = self
@@ -361,7 +376,7 @@ impl ConnectedDevice {
             signature: signature_bytes,
             message: params.message.as_bytes().to_vec(),
             coin_name: Some(coin_name),
-            chunkify: None,
+            chunkify: params.chunkify,
         };
 
         let (resp_type, resp_data) = self
@@ -441,6 +456,12 @@ impl ConnectedDevice {
                 .into());
             }
         }
+
+        validate_sign_tx_params(&params)?;
+
+        // SLIP-24: when payment requests are present every output belongs to
+        // the (single) request, so default payment_req_index to 0 like JS does.
+        let auto_payment_req = !params.payment_requests.is_empty();
 
         // Parse all input paths upfront (EXTERNAL inputs may have empty paths)
         let parsed_inputs: Vec<(Vec<u32>, ScriptType)> = params
@@ -668,7 +689,11 @@ impl ConnectedDevice {
                             ))
                             .into());
                         }
-                        self.build_output_ack(&params.outputs[idx], &parsed_outputs[idx])?
+                        self.build_output_ack(
+                            &params.outputs[idx],
+                            &parsed_outputs[idx],
+                            auto_payment_req,
+                        )?
                     };
 
                     let result = self
@@ -772,6 +797,7 @@ impl ConnectedDevice {
                     let tx_ack = self.build_output_ack(
                         &params.outputs[output_idx],
                         &parsed_outputs[output_idx],
+                        auto_payment_req,
                     )?;
 
                     let result = self
@@ -956,7 +982,9 @@ impl ConnectedDevice {
             prev_hash,
             prev_index: input.prev_index,
             script_sig,
-            sequence: input.sequence.or(Some(0xFFFFFFFD)), // RBF enabled by default
+            // Omitted when unset so firmware applies its 0xFFFFFFFF default,
+            // matching @trezor/connect. Callers wanting RBF set 0xFFFFFFFD.
+            sequence: input.sequence,
             script_type: Some(parsed.1 as i32),
             multisig,
             amount: Some(input.amount),
@@ -1001,6 +1029,7 @@ impl ConnectedDevice {
         &self,
         output: &SignTxOutput,
         parsed: &Option<(Vec<u32>, ScriptType)>,
+        auto_payment_req: bool,
     ) -> Result<protos::bitcoin::TxAck> {
         let orig_hash = output
             .orig_hash
@@ -1009,7 +1038,10 @@ impl ConnectedDevice {
             .transpose()
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid orig_hash hex: {}", e)))?;
         let orig_index = output.orig_index;
-        let payment_req_index = output.payment_req_index;
+        let payment_req_index =
+            output
+                .payment_req_index
+                .or(if auto_payment_req { Some(0) } else { None });
 
         let tx_output = if let Some(ref op_return_data) = output.op_return_data {
             // OP_RETURN output
@@ -1350,6 +1382,92 @@ impl std::fmt::Debug for ConnectedDevice {
     }
 }
 
+/// Client-side validation performed before any message is sent to the device.
+/// Mirrors the checks `@trezor/connect` runs in `signTransaction`.
+fn validate_sign_tx_params(params: &SignTxParams) -> Result<()> {
+    let coin = params.coin.unwrap_or_default();
+
+    // Total spendable (non-OP_RETURN) output value must clear the dust limit.
+    let spendable: Vec<u64> = params
+        .outputs
+        .iter()
+        .filter(|o| o.op_return_data.is_none())
+        .map(|o| o.amount)
+        .collect();
+    if !spendable.is_empty() {
+        let total: u64 = spendable.iter().sum();
+        if total < crate::constants::DUST_LIMIT_SATOSHIS {
+            return Err(
+                DeviceError::InvalidInput("Total amount is below dust limit".to_string()).into(),
+            );
+        }
+    }
+
+    // EXTERNAL inputs must carry the previous output's script.
+    for (i, input) in params.inputs.iter().enumerate() {
+        if input.script_type == ScriptType::External && input.script_pubkey.is_none() {
+            return Err(DeviceError::InvalidInput(format!(
+                "Input {}: EXTERNAL input requires script_pubkey",
+                i
+            ))
+            .into());
+        }
+    }
+
+    // External output addresses must parse and match the coin network.
+    for (i, output) in params.outputs.iter().enumerate() {
+        if let Some(ref address) = output.address {
+            crate::bitcoin_utils::address_to_script(address, coin)
+                .map_err(|e| DeviceError::InvalidInput(format!("Output {}: {}", i, e)))?;
+        }
+    }
+
+    // Previous transactions are required for every input the device verifies
+    // by streaming its prev tx: everything except taproot and external inputs
+    // (segwit included). Fail early with the full list instead of erroring
+    // mid-flow on the first device request.
+    let mut missing: Vec<String> = Vec::new();
+    for input in &params.inputs {
+        if matches!(
+            input.script_type,
+            ScriptType::SpendTaproot | ScriptType::External
+        ) {
+            continue;
+        }
+        let hash = input.prev_hash.to_lowercase();
+        let provided = params
+            .prev_txs
+            .iter()
+            .any(|tx| tx.hash.eq_ignore_ascii_case(&hash));
+        if !provided && !missing.contains(&hash) {
+            missing.push(hash);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(DeviceError::InvalidInput(format!(
+            "Missing previous transactions for inputs: {}",
+            missing.join(", ")
+        ))
+        .into());
+    }
+
+    // Declared prev tx hashes must match their contents (skipped for txs
+    // carrying extra_data, which serialize differently).
+    for prev in &params.prev_txs {
+        if let Some(computed) = crate::bitcoin_utils::compute_prev_txid(prev)? {
+            if !computed.eq_ignore_ascii_case(&prev.hash) {
+                return Err(crate::error::BitcoinError::InvalidTransaction(format!(
+                    "prev tx {}: provided contents hash to {}",
+                    prev.hash, computed
+                ))
+                .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Find a previous transaction by its hash (hex-encoded bytes from the device).
 fn find_prev_tx<'a>(
     prev_txs: &'a [SignTxPrevTx],
@@ -1358,7 +1476,7 @@ fn find_prev_tx<'a>(
     let tx_hash_hex = hex::encode(tx_hash_bytes);
     prev_txs
         .iter()
-        .find(|tx| tx.hash == tx_hash_hex)
+        .find(|tx| tx.hash.eq_ignore_ascii_case(&tx_hash_hex))
         .ok_or_else(|| {
             DeviceError::InvalidInput(format!(
                 "Previous transaction {} not found in prev_txs",
@@ -1377,46 +1495,54 @@ fn convert_multisig(config: &MultisigConfig) -> Result<protos::bitcoin::Multisig
         .iter()
         .map(|pk| {
             let node = if let Some(ref hd) = pk.node {
-                Some(protos::common::HdNodeType {
+                crate::params::HDNodeType {
                     depth: hd.depth,
                     fingerprint: hd.fingerprint,
                     child_num: hd.child_num,
                     chain_code: hd.chain_code.clone(),
-                    private_key: None,
                     public_key: hd.public_key.clone(),
-                })
-            } else if let Some(ref _xpub) = pk.xpub {
-                // When xpub is provided without an explicit node, the device expects
-                // the node field. The caller should provide the decoded HDNodeType.
-                // For now we leave node as a placeholder — the device will reject
-                // if neither node nor xpub resolves.
-                None
+                }
+            } else if let Some(ref xpub) = pk.xpub {
+                // Decode the xpub into the node fields the device expects,
+                // like JS convertMultisigPubKey does.
+                crate::bitcoin_utils::xpub_to_hd_node_type(xpub)?
             } else {
-                None
+                return Err(DeviceError::InvalidInput(
+                    "Multisig pubkey requires either node or xpub".to_string(),
+                )
+                .into());
             };
 
-            HdNodePathType {
-                node: node.unwrap_or_default(),
+            Ok(HdNodePathType {
+                node: protos::common::HdNodeType {
+                    depth: node.depth,
+                    fingerprint: node.fingerprint,
+                    child_num: node.child_num,
+                    chain_code: node.chain_code,
+                    private_key: None,
+                    public_key: node.public_key,
+                },
                 address_n: pk.address_n.clone(),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
-    let signatures = config
-        .signatures
-        .as_ref()
-        .map(|sigs| {
-            sigs.iter()
-                .map(|s| {
-                    if s.is_empty() {
-                        vec![]
-                    } else {
-                        hex::decode(s).unwrap_or_default()
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_else(|| vec![vec![]; config.pubkeys.len()]);
+    let signatures = match config.signatures.as_ref() {
+        Some(sigs) => sigs
+            .iter()
+            .map(|s| {
+                if s.is_empty() {
+                    Ok(vec![])
+                } else {
+                    hex::decode(s).map_err(|e| {
+                        DeviceError::InvalidInput(format!("Invalid multisig signature hex: {}", e))
+                            .into()
+                    })
+                }
+            })
+            .collect::<Result<Vec<_>>>()?,
+        None => vec![vec![]; config.pubkeys.len()],
+    };
 
     Ok(protos::bitcoin::MultisigRedeemScriptType {
         pubkeys,
@@ -1506,6 +1632,7 @@ fn infer_script_type(path: &[u32]) -> ScriptType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::mock::{MockTransport, ScriptedExchange};
 
     #[test]
     fn test_infer_script_type() {
@@ -1525,5 +1652,372 @@ mod tests {
             infer_script_type(&[0x80000056, 0x80000000, 0x80000000, 0, 0]),
             ScriptType::SpendTaproot
         );
+    }
+
+    // ---- Test helpers -----------------------------------------------------
+
+    fn mock_device(script: Vec<ScriptedExchange>) -> (ConnectedDevice, MockTransport) {
+        let mock = MockTransport::new(script);
+        let handle = mock.clone();
+        let device = ConnectedDevice::new(
+            DeviceInfo::new_usb("mock".into(), 0x1209, 0x53c1),
+            Box::new(mock),
+            "mock-session".into(),
+        );
+        (device, handle)
+    }
+
+    fn tx_request_reply(
+        request_type: tx_request::RequestType,
+        request_index: Option<u32>,
+    ) -> Vec<u8> {
+        protos::bitcoin::TxRequest {
+            request_type: Some(request_type as i32),
+            details: Some(tx_request::TxRequestDetailsType {
+                request_index,
+                tx_hash: None,
+                extra_data_len: None,
+                extra_data_offset: None,
+            }),
+            serialized: None,
+        }
+        .encode_to_vec()
+    }
+
+    fn tx_finished_reply() -> Vec<u8> {
+        protos::bitcoin::TxRequest {
+            request_type: Some(tx_request::RequestType::Txfinished as i32),
+            details: None,
+            serialized: Some(tx_request::TxRequestSerializedType {
+                signature_index: Some(0),
+                signature: Some(vec![0xaa, 0xbb]),
+                serialized_tx: Some(vec![0x01, 0x02, 0x03]),
+            }),
+        }
+        .encode_to_vec()
+    }
+
+    fn taproot_input() -> SignTxInput {
+        SignTxInput {
+            prev_hash: "aa".repeat(32),
+            prev_index: 0,
+            path: "m/86'/0'/0'/0/0".into(),
+            amount: 100_000,
+            script_type: ScriptType::SpendTaproot,
+            sequence: None,
+            orig_hash: None,
+            orig_index: None,
+            multisig: None,
+            script_pubkey: None,
+            script_sig: None,
+            witness: None,
+            ownership_proof: None,
+            commitment_data: None,
+        }
+    }
+
+    fn address_output(amount: u64) -> SignTxOutput {
+        SignTxOutput {
+            address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".into()),
+            path: None,
+            amount,
+            script_type: None,
+            op_return_data: None,
+            orig_hash: None,
+            orig_index: None,
+            multisig: None,
+            payment_req_index: None,
+        }
+    }
+
+    fn base_params() -> SignTxParams {
+        SignTxParams {
+            inputs: vec![taproot_input()],
+            outputs: vec![address_output(90_000)],
+            ..Default::default()
+        }
+    }
+
+    /// Standard 1-in/1-out script: SignTx -> TXINPUT -> TXOUTPUT -> TXFINISHED
+    fn simple_flow_script() -> Vec<ScriptedExchange> {
+        vec![
+            ScriptedExchange {
+                expect_type: MessageType::SignTx as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txinput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_finished_reply(),
+            },
+        ]
+    }
+
+    fn decode_tx_ack(payload: &[u8]) -> protos::bitcoin::TxAck {
+        protos::bitcoin::TxAck::decode(payload).expect("valid TxAck payload")
+    }
+
+    // ---- Pre-sign validation ----------------------------------------------
+
+    #[tokio::test]
+    async fn sign_rejects_total_below_dust_limit() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        params.outputs = vec![address_output(545)];
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(err.to_string().contains("dust"), "unexpected error: {err}");
+        assert!(mock.calls().is_empty(), "device must not be contacted");
+    }
+
+    #[tokio::test]
+    async fn sign_accepts_total_at_dust_limit() {
+        let (device, mock) = mock_device(simple_flow_script());
+        let mut params = base_params();
+        params.outputs = vec![address_output(546)];
+
+        let signed = device.sign_transaction(params).await.unwrap();
+        assert_eq!(signed.serialized_tx, "010203");
+        assert_eq!(signed.signatures[0], "aabb");
+        assert_eq!(mock.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn sign_requires_prev_txs_for_non_taproot_inputs() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        params.inputs[0].script_type = ScriptType::SpendWitness;
+        params.inputs[0].path = "m/84'/0'/0'/0/0".into();
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Missing previous transactions") && msg.contains(&"aa".repeat(32)),
+            "unexpected error: {msg}"
+        );
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_taproot_needs_no_prev_txs() {
+        let (device, _mock) = mock_device(simple_flow_script());
+        device.sign_transaction(base_params()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_external_input_without_script_pubkey() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        params.inputs[0].script_type = ScriptType::External;
+        params.inputs[0].path = String::new();
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(err.to_string().contains("script_pubkey"));
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_invalid_output_address() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        params.outputs[0].address = Some("not-an-address".into());
+
+        assert!(device.sign_transaction(params).await.is_err());
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_wrong_network_output_address() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        // testnet address while coin defaults to Bitcoin mainnet
+        params.outputs[0].address = Some("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into());
+
+        assert!(device.sign_transaction(params).await.is_err());
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_prev_tx_hash_mismatch() {
+        let (device, mock) = mock_device(vec![]);
+        let mut params = base_params();
+        params.inputs[0].script_type = ScriptType::SpendWitness;
+        params.inputs[0].path = "m/84'/0'/0'/0/0".into();
+        params.inputs[0].prev_hash = "bb".repeat(32);
+        // Declared hash matches the input, but the contents hash to something else.
+        params.prev_txs = vec![SignTxPrevTx {
+            hash: "bb".repeat(32),
+            version: 1,
+            lock_time: 0,
+            inputs: vec![SignTxPrevTxInput {
+                prev_hash: "cc".repeat(32),
+                prev_index: 0,
+                script_sig: String::new(),
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![SignTxPrevTxOutput {
+                amount: 100_000,
+                script_pubkey: "0014751e76e8199196d454941c45d1b3a323f1433bd6".into(),
+            }],
+            extra_data: None,
+        }];
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(
+            err.to_string().contains("hash to"),
+            "unexpected error: {err}"
+        );
+        assert!(mock.calls().is_empty());
+    }
+
+    // ---- Protocol fidelity -------------------------------------------------
+
+    #[tokio::test]
+    async fn sign_omits_sequence_when_unset() {
+        let (device, mock) = mock_device(simple_flow_script());
+        device.sign_transaction(base_params()).await.unwrap();
+
+        let calls = mock.calls();
+        // calls[0] is SignTx, calls[1] is the TXINPUT TxAck
+        let ack = decode_tx_ack(&calls[1].1);
+        let input = &ack.tx.unwrap().inputs[0];
+        assert_eq!(input.sequence, None, "sequence must be omitted when unset");
+    }
+
+    #[tokio::test]
+    async fn sign_passes_explicit_sequence_through() {
+        let (device, mock) = mock_device(simple_flow_script());
+        let mut params = base_params();
+        params.inputs[0].sequence = Some(0xFFFFFFFD);
+        device.sign_transaction(params).await.unwrap();
+
+        let ack = decode_tx_ack(&mock.calls()[1].1);
+        assert_eq!(ack.tx.unwrap().inputs[0].sequence, Some(0xFFFFFFFD));
+    }
+
+    #[tokio::test]
+    async fn sign_auto_assigns_payment_req_index() {
+        let (device, mock) = mock_device(simple_flow_script());
+        let mut params = base_params();
+        params.payment_requests = vec![PaymentRequest {
+            recipient_name: "Merchant".into(),
+            nonce: None,
+            memos: vec![],
+            amount: Some(90_000),
+            signature: "00".into(),
+        }];
+        device.sign_transaction(params).await.unwrap();
+
+        let ack = decode_tx_ack(&mock.calls()[2].1);
+        let output = &ack.tx.unwrap().outputs[0];
+        assert_eq!(
+            output.payment_req_index,
+            Some(0),
+            "payment_req_index must default to 0 when payment requests exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_leaves_payment_req_index_unset_without_requests() {
+        let (device, mock) = mock_device(simple_flow_script());
+        device.sign_transaction(base_params()).await.unwrap();
+
+        let ack = decode_tx_ack(&mock.calls()[2].1);
+        assert_eq!(ack.tx.unwrap().outputs[0].payment_req_index, None);
+    }
+
+    // ---- Multisig conversion -----------------------------------------------
+
+    #[test]
+    fn convert_multisig_decodes_xpub_only_pubkeys() {
+        let config = MultisigConfig {
+            m: 2,
+            pubkeys: vec![MultisigPubkey {
+                node: None,
+                xpub: Some(
+                    "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
+                        .into(),
+                ),
+                address_n: vec![0, 0],
+            }],
+            signatures: None,
+        };
+
+        let proto = convert_multisig(&config).unwrap();
+        let node = &proto.pubkeys[0].node;
+        assert_eq!(node.public_key.len(), 33);
+        assert!(node.public_key[0] == 0x02 || node.public_key[0] == 0x03);
+        assert_eq!(node.chain_code.len(), 32);
+        assert_eq!(proto.signatures, vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn convert_multisig_rejects_pubkey_without_node_or_xpub() {
+        let config = MultisigConfig {
+            m: 1,
+            pubkeys: vec![MultisigPubkey {
+                node: None,
+                xpub: None,
+                address_n: vec![],
+            }],
+            signatures: None,
+        };
+        assert!(convert_multisig(&config).is_err());
+    }
+
+    #[test]
+    fn convert_multisig_rejects_bad_signature_hex() {
+        let config = MultisigConfig {
+            m: 1,
+            pubkeys: vec![MultisigPubkey {
+                node: Some(HDNodeType {
+                    depth: 0,
+                    fingerprint: 0,
+                    child_num: 0,
+                    chain_code: vec![0; 32],
+                    public_key: vec![2; 33],
+                }),
+                xpub: None,
+                address_n: vec![],
+            }],
+            signatures: Some(vec!["zz-not-hex".into()]),
+        };
+        assert!(convert_multisig(&config).is_err());
+    }
+
+    // ---- Model One message size ---------------------------------------------
+
+    #[tokio::test]
+    async fn sign_message_rejects_oversized_message_on_model_one() {
+        let features_reply = protos::management::Features {
+            major_version: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+
+        let (mut device, mock) = mock_device(vec![ScriptedExchange {
+            expect_type: MessageType::Initialize as u16,
+            reply_type: MessageType::Features as u16,
+            reply: features_reply,
+        }]);
+        device.initialize().await.unwrap();
+
+        let err = device
+            .sign_message(SignMessageParams {
+                path: "m/84'/0'/0'/0/0".into(),
+                message: "x".repeat(1025),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("1024"));
+        // Only the Initialize exchange happened
+        assert_eq!(mock.calls().len(), 1);
     }
 }
