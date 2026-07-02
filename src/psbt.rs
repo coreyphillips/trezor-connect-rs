@@ -218,12 +218,12 @@ pub fn psbt_to_sign_tx_params(
         lock_time: Some(unsigned_tx.lock_time.to_consensus_u32()),
         version: Some(unsigned_tx.version.0 as u32),
         prev_txs,
-        push: None,
         amount_unit: None,
         serialize: None,
         chunkify: None,
         unlock_path: None,
         payment_requests: vec![],
+        ..Default::default()
     })
 }
 

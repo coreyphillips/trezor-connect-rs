@@ -147,17 +147,67 @@ impl ConnectedDevice {
             .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
         let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let multisig = params.multisig.as_ref().map(convert_multisig).transpose()?;
 
-        let request = protos::bitcoin::GetAddress {
+        let build_request = |show_display: bool| protos::bitcoin::GetAddress {
             address_n: address_n.clone(),
-            coin_name: Some(coin_name),
-            show_display: Some(params.show_on_trezor),
+            coin_name: Some(coin_name.clone()),
+            show_display: Some(show_display),
             script_type: Some(script_type as i32),
-            multisig: None,
+            multisig: multisig.clone(),
             ignore_xpub_magic: None,
-            chunkify: None,
+            chunkify: params.chunkify,
         };
 
+        // When displaying, first derive the address silently and compare it
+        // against the caller-supplied expectation (JS getAddress parity). The
+        // silent result becomes the expectation when none was supplied, so a
+        // device returning a different address from the display call is
+        // caught either way.
+        let mut expected = params.address.clone();
+        if params.show_on_trezor {
+            let silent = self.get_address_raw(build_request(false)).await?;
+            match expected {
+                Some(ref exp) if *exp != silent.address => {
+                    return Err(DeviceError::AddressMismatch {
+                        expected: exp.clone(),
+                        actual: silent.address,
+                    }
+                    .into());
+                }
+                None => expected = Some(silent.address),
+                _ => {}
+            }
+        }
+
+        let response = self
+            .get_address_raw(build_request(params.show_on_trezor))
+            .await?;
+
+        if let Some(ref exp) = expected {
+            if *exp != response.address {
+                return Err(DeviceError::AddressMismatch {
+                    expected: exp.clone(),
+                    actual: response.address,
+                }
+                .into());
+            }
+        }
+
+        Ok(AddressResponse {
+            path: address_n.clone(),
+            serialized_path: serialize_path(&address_n),
+            address: response.address,
+            mac: response.mac.map(hex::encode),
+        })
+    }
+
+    /// Send a GetAddress request and decode the Address response, handling
+    /// button/PIN/passphrase interactions.
+    async fn get_address_raw(
+        &self,
+        request: protos::bitcoin::GetAddress,
+    ) -> Result<protos::bitcoin::Address> {
         let (resp_type, resp_data) = self
             .transport
             .call(
@@ -166,14 +216,7 @@ impl ConnectedDevice {
                 &request.encode_to_vec(),
             )
             .await?;
-
-        let response: protos::bitcoin::Address = self.handle_response(resp_type, resp_data).await?;
-
-        Ok(AddressResponse {
-            path: address_n.clone(),
-            serialized_path: serialize_path(&address_n),
-            address: response.address,
-        })
+        self.handle_response(resp_type, resp_data).await
     }
 
     /// Derive this wallet's static session id — a stable fingerprint of the
@@ -204,7 +247,7 @@ impl ConnectedDevice {
                 coin: Some(crate::types::network::Network::Testnet),
                 show_on_trezor: false,
                 script_type: Some(ScriptType::SpendAddress),
-                multisig: None,
+                ..Default::default()
             })
             .await?;
 
@@ -2315,6 +2358,187 @@ mod tests {
         assert_eq!(signed.witnesses, None);
         // No GetPublicKey derivation call happened; first call is SignTx
         assert_eq!(mock.calls()[0].0, MessageType::SignTx as u16);
+    }
+
+    // ---- get_address ---------------------------------------------------------
+
+    fn address_reply(address: &str, mac: Option<Vec<u8>>) -> Vec<u8> {
+        protos::bitcoin::Address {
+            address: address.into(),
+            mac,
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn get_address_show_does_silent_prederive_then_display() {
+        let script = vec![
+            ScriptedExchange {
+                expect_type: MessageType::GetAddress as u16,
+                reply_type: MessageType::Address as u16,
+                reply: address_reply("bc1qexample", None),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::GetAddress as u16,
+                reply_type: MessageType::Address as u16,
+                reply: address_reply("bc1qexample", Some(vec![0xab, 0xcd])),
+            },
+        ];
+        let (device, mock) = mock_device(script);
+
+        let result = device
+            .get_address(GetAddressParams {
+                path: "m/84'/0'/0'/0/0".into(),
+                show_on_trezor: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.address, "bc1qexample");
+        assert_eq!(result.mac.as_deref(), Some("abcd"));
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "silent pre-derive then display call");
+        let silent = protos::bitcoin::GetAddress::decode(calls[0].1.as_slice()).unwrap();
+        assert_eq!(silent.show_display, Some(false));
+        let display = protos::bitcoin::GetAddress::decode(calls[1].1.as_slice()).unwrap();
+        assert_eq!(display.show_display, Some(true));
+    }
+
+    #[tokio::test]
+    async fn get_address_rejects_mismatched_expected_address() {
+        let script = vec![ScriptedExchange {
+            expect_type: MessageType::GetAddress as u16,
+            reply_type: MessageType::Address as u16,
+            reply: address_reply("bc1qactual", None),
+        }];
+        let (device, mock) = mock_device(script);
+
+        let err = device
+            .get_address(GetAddressParams {
+                path: "m/84'/0'/0'/0/0".into(),
+                show_on_trezor: true,
+                address: Some("bc1qexpected".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::TrezorError::Device(DeviceError::AddressMismatch { .. })
+        ));
+        // Failed before the display call: only the silent call happened
+        assert_eq!(mock.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_address_rejects_display_result_differing_from_silent() {
+        let script = vec![
+            ScriptedExchange {
+                expect_type: MessageType::GetAddress as u16,
+                reply_type: MessageType::Address as u16,
+                reply: address_reply("bc1qsilent", None),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::GetAddress as u16,
+                reply_type: MessageType::Address as u16,
+                reply: address_reply("bc1qdifferent", None),
+            },
+        ];
+        let (device, _mock) = mock_device(script);
+
+        let err = device
+            .get_address(GetAddressParams {
+                path: "m/84'/0'/0'/0/0".into(),
+                show_on_trezor: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::TrezorError::Device(DeviceError::AddressMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_address_without_display_makes_single_call() {
+        let script = vec![ScriptedExchange {
+            expect_type: MessageType::GetAddress as u16,
+            reply_type: MessageType::Address as u16,
+            reply: address_reply("bc1qexample", None),
+        }];
+        let (device, mock) = mock_device(script);
+
+        let result = device
+            .get_address(GetAddressParams {
+                path: "m/84'/0'/0'/0/0".into(),
+                show_on_trezor: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.address, "bc1qexample");
+        assert_eq!(mock.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_address_wires_multisig_through() {
+        let script = vec![ScriptedExchange {
+            expect_type: MessageType::GetAddress as u16,
+            reply_type: MessageType::Address as u16,
+            reply: address_reply("3multisig", None),
+        }];
+        let (device, mock) = mock_device(script);
+
+        device
+            .get_address(GetAddressParams {
+                path: "m/48'/0'/0'/0/0/0".into(),
+                show_on_trezor: false,
+                script_type: Some(ScriptType::SpendMultisig),
+                multisig: Some(MultisigConfig {
+                    m: 2,
+                    pubkeys: vec![MultisigPubkey {
+                        node: None,
+                        xpub: Some(
+                            "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
+                                .into(),
+                        ),
+                        address_n: vec![0, 0],
+                    }],
+                    signatures: None,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let request = protos::bitcoin::GetAddress::decode(mock.calls()[0].1.as_slice()).unwrap();
+        let multisig = request.multisig.expect("multisig must be forwarded");
+        assert_eq!(multisig.m, 2);
+        assert_eq!(multisig.pubkeys[0].node.public_key.len(), 33);
+    }
+
+    // ---- Deprecated api stubs -------------------------------------------------
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn api_stubs_error_instead_of_returning_fake_data() {
+        assert!(matches!(
+            crate::api::public_key::get_public_key(Default::default())
+                .await
+                .unwrap_err(),
+            crate::error::TrezorError::NotImplemented(_)
+        ));
+        assert!(matches!(
+            crate::api::coinjoin::cancel_coinjoin_authorization()
+                .await
+                .unwrap_err(),
+            crate::error::TrezorError::NotImplemented(_)
+        ));
     }
 
     // ---- Multisig conversion -----------------------------------------------

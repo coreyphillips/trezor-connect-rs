@@ -397,6 +397,13 @@ impl<T: Transport> TrezorClient<T> {
     /// Sign a Bitcoin transaction
     ///
     /// This implements the TxRequest/TxAck flow used by Trezor for transaction signing.
+    ///
+    /// **Note**: this is the legacy low-level path. It supports plain
+    /// single-sig flows only: no payment requests (TXPAYMENTREQ), no prev-tx
+    /// extra data (TXEXTRADATA), no multisig, no external inputs, and no
+    /// post-sign verification of the returned transaction. Prefer
+    /// [`ConnectedDevice::sign_transaction`](crate::connected_device::ConnectedDevice::sign_transaction),
+    /// which supports all of the above.
     pub async fn sign_transaction(
         &self,
         params: &SignTransactionParams,
@@ -689,8 +696,9 @@ impl<T: Transport> TrezorClient<T> {
                     resp_data = result.1;
                 }
                 _ => {
-                    return Err(DeviceError::ProtobufDecode(format!(
-                        "Unsupported request type: {:?}",
+                    return Err(DeviceError::NotSupported(format!(
+                        "TrezorClient::sign_transaction does not handle {:?} \
+                         (TXEXTRADATA/TXPAYMENTREQ); use ConnectedDevice::sign_transaction",
                         request_type
                     ))
                     .into());
@@ -921,7 +929,10 @@ impl<T: Transport> TrezorClient<T> {
                 inputs_cnt: Some(prev_tx.inputs.len() as u32),
                 outputs_cnt: Some(prev_tx.outputs.len() as u32),
                 extra_data: None,
-                extra_data_len: Some(0),
+                // Omitted rather than hardcoded to 0: this legacy path has no
+                // extra_data support, and a forced 0 breaks prev txs that
+                // carry extra data
+                extra_data_len: None,
                 expiry: None,
                 overwintered: None,
                 version_group_id: None,

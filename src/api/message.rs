@@ -35,17 +35,26 @@ pub struct VerifyMessageParams {
     pub coin: String,
 }
 
-/// Sign a message
+/// Sign a message.
+///
+/// **Not implemented**: this standalone function has no device connection.
+/// Use [`ConnectedDevice::sign_message()`](crate::connected_device::ConnectedDevice::sign_message)
+/// instead.
+#[deprecated(note = "Use ConnectedDevice::sign_message() instead")]
 pub async fn sign_message(_params: SignMessageParams) -> Result<MessageSignature> {
-    // TODO: Implement
-    Ok(MessageSignature {
-        address: String::new(),
-        signature: String::new(),
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::sign_message; use ConnectedDevice::sign_message",
+    ))
 }
 
-/// Verify a message signature
+/// Verify a message signature.
+///
+/// **Not implemented**: this standalone function has no device connection.
+/// Use [`ConnectedDevice::verify_message()`](crate::connected_device::ConnectedDevice::verify_message)
+/// instead.
+#[deprecated(note = "Use ConnectedDevice::verify_message() instead")]
 pub async fn verify_message(_params: VerifyMessageParams) -> Result<bool> {
-    // TODO: Implement
-    Ok(true)
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::verify_message; use ConnectedDevice::verify_message",
+    ))
 }

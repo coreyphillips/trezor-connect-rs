@@ -45,5 +45,7 @@ pub struct AddressResponse {
 /// instead, which communicates with the actual device via the transport layer.
 #[deprecated(note = "Use ConnectedDevice::get_address() instead")]
 pub async fn get_address(_params: GetAddressParams) -> Result<AddressResponse> {
-    unimplemented!("Use ConnectedDevice::get_address() for real device communication")
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::get_address; use ConnectedDevice::get_address",
+    ))
 }

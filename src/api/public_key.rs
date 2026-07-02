@@ -52,19 +52,14 @@ pub struct PublicKeyResponse {
     pub root_fingerprint: Option<u32>,
 }
 
-/// Get public key from the device
+/// Get public key from the device.
+///
+/// **Not implemented**: this standalone function has no device connection.
+/// Use [`ConnectedDevice::get_public_key()`](crate::connected_device::ConnectedDevice::get_public_key)
+/// instead.
+#[deprecated(note = "Use ConnectedDevice::get_public_key() instead")]
 pub async fn get_public_key(_params: GetPublicKeyParams) -> Result<PublicKeyResponse> {
-    // TODO: Implement
-    Ok(PublicKeyResponse {
-        public_key: "02...".to_string(),
-        xpub: "xpub...".to_string(),
-        xpub_segwit: Some("zpub...".to_string()),
-        chain_code: "00...".to_string(),
-        fingerprint: 0,
-        depth: 3,
-        child_num: 0x80000000,
-        path: vec![84 | 0x80000000, 0x80000000, 0x80000000],
-        serialized_path: "m/84'/0'/0'".to_string(),
-        root_fingerprint: None,
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::get_public_key; use ConnectedDevice::get_public_key",
+    ))
 }

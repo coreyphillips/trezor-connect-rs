@@ -13,6 +13,10 @@ pub struct AddressResponse {
     pub serialized_path: String,
     /// The Bitcoin address
     pub address: String,
+    /// Address authentication code (hex), used e.g. for SLIP-24 refund and
+    /// coin-purchase memos. Only returned by supporting firmware.
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 /// Response from get_public_key.
@@ -93,6 +97,7 @@ mod tests {
             path: vec![0x80000054, 0x80000000, 0x80000000, 0, 0],
             serialized_path: "m/84'/0'/0'/0/0".into(),
             address: "bc1qtest".into(),
+            mac: None,
         };
         assert_eq!(response.address, "bc1qtest");
     }

@@ -46,6 +46,11 @@ pub enum TrezorError {
     /// I/O error (file operations)
     #[error("I/O error: {0}")]
     IoError(String),
+
+    /// Functionality that exists in the API surface but is not implemented
+    /// in this crate.
+    #[error("Not implemented: {0}")]
+    NotImplemented(&'static str),
 }
 
 /// Transport layer errors.
@@ -201,6 +206,18 @@ pub enum DeviceError {
     /// Invalid input
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// The device returned an address that differs from the expected one.
+    /// Mirrors trezor-suite's `Method_AddressNotMatch`.
+    #[error(
+        "Device address does not match the expected address: expected {expected}, got {actual}"
+    )]
+    AddressMismatch {
+        /// The address the caller expected (or the silent pre-derivation)
+        expected: String,
+        /// The address the device actually returned
+        actual: String,
+    },
 }
 
 impl DeviceError {

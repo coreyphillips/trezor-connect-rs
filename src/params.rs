@@ -19,6 +19,13 @@ pub struct GetAddressParams {
     pub script_type: Option<ScriptType>,
     /// Multisig configuration (for multisig addresses)
     pub multisig: Option<MultisigConfig>,
+    /// Display the address in chunks of 4 characters on the device
+    /// (firmware 2.6.3+)
+    pub chunkify: Option<bool>,
+    /// Expected address. When set together with `show_on_trezor`, the device
+    /// derivation is compared against it before display and
+    /// `DeviceError::AddressMismatch` is returned on mismatch.
+    pub address: Option<String>,
 }
 
 /// Parameters for getting a public key from the device.
@@ -284,7 +291,10 @@ pub struct SignTxParams {
     pub version: Option<u32>,
     /// Previous transactions (for non-SegWit input verification)
     pub prev_txs: Vec<SignTxPrevTx>,
-    /// Broadcast signed transaction (client-side)
+    /// Ignored. This crate has no blockchain backend, so the signed
+    /// transaction is never broadcast; `txid` is computed locally instead.
+    /// Broadcast through your own chain source.
+    #[deprecated(note = "No broadcast backend in this crate; the field is ignored")]
     pub push: Option<bool>,
     /// Display unit on device
     pub amount_unit: Option<AmountUnit>,

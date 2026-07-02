@@ -45,15 +45,14 @@ pub struct AccountInfo {
     pub path: Option<String>,
 }
 
-/// Get account information
+/// Get account information.
+///
+/// **Not implemented**: this crate has no blockchain backend. Account data
+/// (balances, UTXOs) must be fetched by the caller from their own chain
+/// source (e.g. Electrum or Blockbook).
+#[deprecated(note = "No blockchain backend in this crate; fetch account data externally")]
 pub async fn get_account_info(_params: GetAccountInfoParams) -> Result<AccountInfo> {
-    // TODO: Implement - requires blockchain connection
-    Ok(AccountInfo {
-        descriptor: String::new(),
-        legacy_xpub: None,
-        balance: 0,
-        unconfirmed_balance: 0,
-        utxos: vec![],
-        path: None,
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::get_account_info; this crate has no blockchain backend",
+    ))
 }
