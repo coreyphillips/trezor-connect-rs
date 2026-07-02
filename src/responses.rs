@@ -73,8 +73,14 @@ pub struct SignedTxResponse {
     pub signatures: Vec<String>,
     /// Serialized transaction (hex)
     pub serialized_tx: String,
-    /// Broadcast transaction ID (populated when push=true)
+    /// Transaction ID, computed locally from the verified signed transaction.
+    /// `None` when serialization was disabled (`serialize: Some(false)`).
     pub txid: Option<String>,
+    /// Per-input serialized witness data (hex), extracted from the verified
+    /// signed transaction. `None` entries are non-witness inputs; the outer
+    /// `None` means serialization was disabled.
+    #[serde(default)]
+    pub witnesses: Option<Vec<Option<String>>>,
 }
 
 #[cfg(test)]

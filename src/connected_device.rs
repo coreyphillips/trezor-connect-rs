@@ -494,32 +494,19 @@ impl ConnectedDevice {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Derive the scriptPubKey every output is expected to serialize to,
+        // before signing, so the returned transaction can be verified against
+        // requests independent of the device (JS verifyTx parity). Skipped
+        // when the caller opted out of serialization.
+        let expected_scripts = if params.serialize != Some(false) {
+            Some(self.derive_output_scripts(&params, &parsed_outputs).await?)
+        } else {
+            None
+        };
+
         // Send UnlockPath if provided
         if let Some(ref unlock) = params.unlock_path {
-            let unlock_msg = protos::management::UnlockPath {
-                address_n: unlock.address_n.clone(),
-                mac: unlock
-                    .mac
-                    .as_ref()
-                    .map(|m| hex::decode(m))
-                    .transpose()
-                    .map_err(|e| {
-                        DeviceError::InvalidInput(format!("Invalid unlock_path mac hex: {}", e))
-                    })?,
-            };
-
-            let (resp_type, resp_data) = self
-                .transport
-                .call(
-                    &self.session,
-                    MessageType::UnlockPath as u16,
-                    &unlock_msg.encode_to_vec(),
-                )
-                .await?;
-
-            // Expect UnlockedPathRequest response (message type 94)
-            let _: protos::management::UnlockedPathRequest =
-                self.handle_response(resp_type, resp_data).await?;
+            self.send_unlock_path(unlock).await?;
         }
 
         // Send initial SignTx message
@@ -901,11 +888,144 @@ impl ConnectedDevice {
             }
         }
 
+        // Verify the device-returned transaction against the request and
+        // compute its txid. A mismatch here means the device serialized
+        // something other than what was requested.
+        let mut txid = None;
+        let mut witnesses = None;
+        if let Some(ref expected) = expected_scripts {
+            if !serialized_tx.is_empty() {
+                let tx = crate::tx_verify::verify_signed_tx(
+                    &serialized_tx,
+                    params.inputs.len(),
+                    &params.outputs,
+                    expected,
+                )?;
+                txid = Some(tx.compute_txid().to_string());
+                witnesses = Some(
+                    tx.input
+                        .iter()
+                        .map(|input| {
+                            if input.witness.is_empty() {
+                                None
+                            } else {
+                                Some(hex::encode(bitcoin::consensus::serialize(&input.witness)))
+                            }
+                        })
+                        .collect(),
+                );
+            }
+        }
+
         Ok(SignedTxResponse {
             signatures,
             serialized_tx: hex::encode(&serialized_tx),
-            txid: None,
+            txid,
+            witnesses,
         })
+    }
+
+    /// Send UnlockPath and consume the UnlockedPathRequest response,
+    /// unlocking a keychain subtree (e.g. SLIP-25) for the next command.
+    async fn send_unlock_path(&self, unlock: &UnlockPath) -> Result<()> {
+        let unlock_msg = protos::management::UnlockPath {
+            address_n: unlock.address_n.clone(),
+            mac: unlock
+                .mac
+                .as_ref()
+                .map(|m| hex::decode(m))
+                .transpose()
+                .map_err(|e| {
+                    DeviceError::InvalidInput(format!("Invalid unlock_path mac hex: {}", e))
+                })?,
+        };
+
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::UnlockPath as u16,
+                &unlock_msg.encode_to_vec(),
+            )
+            .await?;
+
+        let _: protos::management::UnlockedPathRequest =
+            self.handle_response(resp_type, resp_data).await?;
+        Ok(())
+    }
+
+    /// Fetch the compressed public key at `address_n` without any device UI,
+    /// honoring an optional UnlockPath prefix (SLIP-25 subtrees).
+    async fn get_node_public_key(
+        &self,
+        address_n: &[u32],
+        coin: crate::types::network::Network,
+        unlock_path: Option<&UnlockPath>,
+    ) -> Result<Vec<u8>> {
+        if let Some(unlock) = unlock_path {
+            self.send_unlock_path(unlock).await?;
+        }
+
+        let request = protos::bitcoin::GetPublicKey {
+            address_n: address_n.to_vec(),
+            ecdsa_curve_name: None,
+            show_display: Some(false),
+            coin_name: Some(coin.coin_name().to_string()),
+            script_type: None,
+            ignore_xpub_magic: None,
+        };
+
+        let (resp_type, resp_data) = self
+            .transport
+            .call(
+                &self.session,
+                MessageType::GetPublicKey as u16,
+                &request.encode_to_vec(),
+            )
+            .await?;
+
+        let response: protos::bitcoin::PublicKey =
+            self.handle_response(resp_type, resp_data).await?;
+        Ok(response.node.public_key)
+    }
+
+    /// Derive the expected scriptPubKey for each output (JS deriveOutputScript
+    /// parity): external addresses parse locally, OP_RETURN embeds its data,
+    /// and change outputs are derived from the device's own public key at the
+    /// output path. Outputs that can't be derived from a single key
+    /// (multisig) yield `None` and are skipped during verification.
+    async fn derive_output_scripts(
+        &self,
+        params: &SignTxParams,
+        parsed_outputs: &[Option<(Vec<u32>, ScriptType)>],
+    ) -> Result<Vec<Option<bitcoin::ScriptBuf>>> {
+        let coin = params.coin.unwrap_or_default();
+        let mut scripts = Vec::with_capacity(params.outputs.len());
+
+        for (output, parsed) in params.outputs.iter().zip(parsed_outputs) {
+            let script = if let Some(ref data) = output.op_return_data {
+                let bytes = hex::decode(data).map_err(|e| {
+                    DeviceError::InvalidInput(format!("Invalid op_return_data hex: {}", e))
+                })?;
+                Some(crate::bitcoin_utils::op_return_script(&bytes)?)
+            } else if output.multisig.is_some() {
+                // Multisig scripts can't be derived from a single key; JS
+                // skips them during verification too.
+                None
+            } else if let Some((path, script_type)) = parsed {
+                let public_key = self
+                    .get_node_public_key(path, coin, params.unlock_path.as_ref())
+                    .await?;
+                crate::bitcoin_utils::script_for_pubkey(&public_key, *script_type)?
+            } else if let Some(ref address) = output.address {
+                Some(crate::bitcoin_utils::address_to_script(address, coin)?)
+            } else {
+                None
+            };
+            scripts.push(script);
+        }
+
+        Ok(scripts)
     }
 
     /// Build TxAck for an input
@@ -1454,14 +1574,14 @@ fn validate_sign_tx_params(params: &SignTxParams) -> Result<()> {
     // Declared prev tx hashes must match their contents (skipped for txs
     // carrying extra_data, which serialize differently).
     for prev in &params.prev_txs {
-        if let Some(computed) = crate::bitcoin_utils::compute_prev_txid(prev)? {
-            if !computed.eq_ignore_ascii_case(&prev.hash) {
-                return Err(crate::error::BitcoinError::InvalidTransaction(format!(
-                    "prev tx {}: provided contents hash to {}",
-                    prev.hash, computed
-                ))
-                .into());
-            }
+        if let Some(computed) = crate::bitcoin_utils::compute_prev_txid(prev)?
+            && !computed.eq_ignore_ascii_case(&prev.hash)
+        {
+            return Err(crate::error::BitcoinError::InvalidTransaction(format!(
+                "prev tx {}: provided contents hash to {}",
+                prev.hash, computed
+            ))
+            .into());
         }
     }
 
@@ -1684,15 +1804,98 @@ mod tests {
         .encode_to_vec()
     }
 
-    fn tx_finished_reply() -> Vec<u8> {
+    /// secp256k1 generator point, compressed. Its P2WPKH address is the
+    /// BIP-173 example bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4.
+    const G_PUBKEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// Build the transaction the mocked device "signs": inputs mirror the
+    /// params, outputs pay the requested amounts to the expected scripts.
+    /// Change outputs use P2WPKH of `G_PUBKEY`, matching the mocked
+    /// GetPublicKey reply from `public_key_reply()`.
+    fn dummy_signed_tx(params: &SignTxParams) -> bitcoin::Transaction {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::transaction::Version;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid, Witness};
+        use std::str::FromStr;
+
+        let input = params
+            .inputs
+            .iter()
+            .map(|i| TxIn {
+                previous_output: OutPoint::new(Txid::from_str(&i.prev_hash).unwrap(), i.prev_index),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(0xffffffff),
+                witness: Witness::from_slice(&[vec![0xaa; 64]]),
+            })
+            .collect();
+
+        let output = params
+            .outputs
+            .iter()
+            .map(|o| {
+                let script_pubkey = if let Some(ref addr) = o.address {
+                    crate::bitcoin_utils::address_to_script(
+                        addr,
+                        crate::types::network::Network::Bitcoin,
+                    )
+                    .unwrap()
+                } else if let Some(ref data) = o.op_return_data {
+                    crate::bitcoin_utils::op_return_script(&hex::decode(data).unwrap()).unwrap()
+                } else {
+                    // change output: P2WPKH of the mocked device pubkey
+                    crate::bitcoin_utils::script_for_pubkey(
+                        &hex::decode(G_PUBKEY).unwrap(),
+                        ScriptType::SpendWitness,
+                    )
+                    .unwrap()
+                    .unwrap()
+                };
+                TxOut {
+                    value: Amount::from_sat(if o.op_return_data.is_some() {
+                        0
+                    } else {
+                        o.amount
+                    }),
+                    script_pubkey,
+                }
+            })
+            .collect();
+
+        bitcoin::Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input,
+            output,
+        }
+    }
+
+    fn tx_finished_reply_with(serialized_tx: Vec<u8>) -> Vec<u8> {
         protos::bitcoin::TxRequest {
             request_type: Some(tx_request::RequestType::Txfinished as i32),
             details: None,
             serialized: Some(tx_request::TxRequestSerializedType {
                 signature_index: Some(0),
                 signature: Some(vec![0xaa, 0xbb]),
-                serialized_tx: Some(vec![0x01, 0x02, 0x03]),
+                serialized_tx: Some(serialized_tx),
             }),
+        }
+        .encode_to_vec()
+    }
+
+    /// Mocked GetPublicKey reply carrying `G_PUBKEY` as the node key.
+    fn public_key_reply() -> Vec<u8> {
+        protos::bitcoin::PublicKey {
+            node: protos::common::HdNodeType {
+                depth: 5,
+                fingerprint: 0,
+                child_num: 0,
+                chain_code: vec![0; 32],
+                private_key: None,
+                public_key: hex::decode(G_PUBKEY).unwrap(),
+            },
+            xpub: "xpub-mock".into(),
+            root_fingerprint: None,
+            descriptor: None,
         }
         .encode_to_vec()
     }
@@ -1738,8 +1941,11 @@ mod tests {
         }
     }
 
-    /// Standard 1-in/1-out script: SignTx -> TXINPUT -> TXOUTPUT -> TXFINISHED
-    fn simple_flow_script() -> Vec<ScriptedExchange> {
+    /// Standard 1-in/1-out script: SignTx -> TXINPUT -> TXOUTPUT -> TXFINISHED,
+    /// finishing with a serialized tx that matches `params` so post-sign
+    /// verification passes.
+    fn simple_flow_script(params: &SignTxParams) -> Vec<ScriptedExchange> {
+        let serialized = bitcoin::consensus::serialize(&dummy_signed_tx(params));
         vec![
             ScriptedExchange {
                 expect_type: MessageType::SignTx as u16,
@@ -1754,7 +1960,7 @@ mod tests {
             ScriptedExchange {
                 expect_type: MessageType::TxAck as u16,
                 reply_type: MessageType::TxRequest as u16,
-                reply: tx_finished_reply(),
+                reply: tx_finished_reply_with(serialized),
             },
         ]
     }
@@ -1778,13 +1984,13 @@ mod tests {
 
     #[tokio::test]
     async fn sign_accepts_total_at_dust_limit() {
-        let (device, mock) = mock_device(simple_flow_script());
         let mut params = base_params();
         params.outputs = vec![address_output(546)];
+        let (device, mock) = mock_device(simple_flow_script(&params));
 
         let signed = device.sign_transaction(params).await.unwrap();
-        assert_eq!(signed.serialized_tx, "010203");
         assert_eq!(signed.signatures[0], "aabb");
+        assert!(signed.txid.is_some());
         assert_eq!(mock.remaining(), 0);
     }
 
@@ -1806,8 +2012,9 @@ mod tests {
 
     #[tokio::test]
     async fn sign_taproot_needs_no_prev_txs() {
-        let (device, _mock) = mock_device(simple_flow_script());
-        device.sign_transaction(base_params()).await.unwrap();
+        let params = base_params();
+        let (device, _mock) = mock_device(simple_flow_script(&params));
+        device.sign_transaction(params).await.unwrap();
     }
 
     #[tokio::test]
@@ -1880,8 +2087,9 @@ mod tests {
 
     #[tokio::test]
     async fn sign_omits_sequence_when_unset() {
-        let (device, mock) = mock_device(simple_flow_script());
-        device.sign_transaction(base_params()).await.unwrap();
+        let params = base_params();
+        let (device, mock) = mock_device(simple_flow_script(&params));
+        device.sign_transaction(params).await.unwrap();
 
         let calls = mock.calls();
         // calls[0] is SignTx, calls[1] is the TXINPUT TxAck
@@ -1892,9 +2100,9 @@ mod tests {
 
     #[tokio::test]
     async fn sign_passes_explicit_sequence_through() {
-        let (device, mock) = mock_device(simple_flow_script());
         let mut params = base_params();
         params.inputs[0].sequence = Some(0xFFFFFFFD);
+        let (device, mock) = mock_device(simple_flow_script(&params));
         device.sign_transaction(params).await.unwrap();
 
         let ack = decode_tx_ack(&mock.calls()[1].1);
@@ -1903,7 +2111,6 @@ mod tests {
 
     #[tokio::test]
     async fn sign_auto_assigns_payment_req_index() {
-        let (device, mock) = mock_device(simple_flow_script());
         let mut params = base_params();
         params.payment_requests = vec![PaymentRequest {
             recipient_name: "Merchant".into(),
@@ -1912,6 +2119,7 @@ mod tests {
             amount: Some(90_000),
             signature: "00".into(),
         }];
+        let (device, mock) = mock_device(simple_flow_script(&params));
         device.sign_transaction(params).await.unwrap();
 
         let ack = decode_tx_ack(&mock.calls()[2].1);
@@ -1925,11 +2133,188 @@ mod tests {
 
     #[tokio::test]
     async fn sign_leaves_payment_req_index_unset_without_requests() {
-        let (device, mock) = mock_device(simple_flow_script());
-        device.sign_transaction(base_params()).await.unwrap();
+        let params = base_params();
+        let (device, mock) = mock_device(simple_flow_script(&params));
+        device.sign_transaction(params).await.unwrap();
 
         let ack = decode_tx_ack(&mock.calls()[2].1);
         assert_eq!(ack.tx.unwrap().outputs[0].payment_req_index, None);
+    }
+
+    // ---- Post-sign verification ---------------------------------------------
+
+    #[tokio::test]
+    async fn sign_returns_verified_txid_and_witnesses() {
+        let params = base_params();
+        let expected_txid = dummy_signed_tx(&params).compute_txid().to_string();
+        let (device, _mock) = mock_device(simple_flow_script(&params));
+
+        let signed = device.sign_transaction(params).await.unwrap();
+        assert_eq!(signed.txid, Some(expected_txid));
+        let witnesses = signed.witnesses.unwrap();
+        assert_eq!(witnesses.len(), 1);
+        assert!(witnesses[0].is_some(), "witness input must surface data");
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_tampered_output_amount() {
+        let params = base_params();
+        // Device "signs" a tx paying a different amount than requested
+        let mut tampered = params.clone();
+        tampered.outputs[0].amount = 80_000;
+        let script = vec![
+            ScriptedExchange {
+                expect_type: MessageType::SignTx as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txinput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_finished_reply_with(bitcoin::consensus::serialize(&dummy_signed_tx(
+                    &tampered,
+                ))),
+            },
+        ];
+        let (device, _mock) = mock_device(script);
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Wrong output amount"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_rejects_tampered_output_script() {
+        let params = base_params();
+        // Device "signs" a tx paying a different address than requested
+        let mut tampered = params.clone();
+        tampered.outputs[0].address = Some("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH".into());
+        let script = vec![
+            ScriptedExchange {
+                expect_type: MessageType::SignTx as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txinput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_finished_reply_with(bitcoin::consensus::serialize(&dummy_signed_tx(
+                    &tampered,
+                ))),
+            },
+        ];
+        let (device, _mock) = mock_device(script);
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(
+            err.to_string().contains("scripts differ"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_verifies_change_output_script_via_device_pubkey() {
+        let mut params = base_params();
+        params.outputs.push(SignTxOutput {
+            address: None,
+            path: Some("m/84'/0'/0'/1/0".into()),
+            amount: 9_000,
+            script_type: None,
+            op_return_data: None,
+            orig_hash: None,
+            orig_index: None,
+            multisig: None,
+            payment_req_index: None,
+        });
+
+        let serialized = bitcoin::consensus::serialize(&dummy_signed_tx(&params));
+        let script = vec![
+            // change output derivation happens before SignTx
+            ScriptedExchange {
+                expect_type: MessageType::GetPublicKey as u16,
+                reply_type: MessageType::PublicKey as u16,
+                reply: public_key_reply(),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::SignTx as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txinput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(1)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_finished_reply_with(serialized),
+            },
+        ];
+        let (device, mock) = mock_device(script);
+
+        let signed = device.sign_transaction(params).await.unwrap();
+        assert!(signed.txid.is_some());
+        assert_eq!(mock.remaining(), 0, "all exchanges must be consumed");
+    }
+
+    #[tokio::test]
+    async fn sign_skips_verification_when_serialize_disabled() {
+        let mut params = base_params();
+        params.serialize = Some(false);
+
+        // Device returns signatures but no serialized tx
+        let finished = protos::bitcoin::TxRequest {
+            request_type: Some(tx_request::RequestType::Txfinished as i32),
+            details: None,
+            serialized: Some(tx_request::TxRequestSerializedType {
+                signature_index: Some(0),
+                signature: Some(vec![0xaa, 0xbb]),
+                serialized_tx: None,
+            }),
+        }
+        .encode_to_vec();
+        let script = vec![
+            ScriptedExchange {
+                expect_type: MessageType::SignTx as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txinput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: tx_request_reply(tx_request::RequestType::Txoutput, Some(0)),
+            },
+            ScriptedExchange {
+                expect_type: MessageType::TxAck as u16,
+                reply_type: MessageType::TxRequest as u16,
+                reply: finished,
+            },
+        ];
+        let (device, mock) = mock_device(script);
+
+        let signed = device.sign_transaction(params).await.unwrap();
+        assert_eq!(signed.txid, None);
+        assert_eq!(signed.witnesses, None);
+        // No GetPublicKey derivation call happened; first call is SignTx
+        assert_eq!(mock.calls()[0].0, MessageType::SignTx as u16);
     }
 
     // ---- Multisig conversion -----------------------------------------------
