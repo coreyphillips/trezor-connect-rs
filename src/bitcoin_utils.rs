@@ -7,11 +7,17 @@
 use std::str::FromStr;
 
 use bitcoin::absolute::LockTime;
+use bitcoin::key::Secp256k1;
+use bitcoin::script::PushBytesBuf;
 use bitcoin::transaction::Version;
-use bitcoin::{Address, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid};
+use bitcoin::{
+    Address, Amount, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
+    XOnlyPublicKey,
+};
 
 use crate::error::{BitcoinError, DeviceError, Result};
 use crate::params::{HDNodeType, SignTxPrevTx};
+use crate::types::bitcoin::ScriptType;
 use crate::types::network::Network;
 
 /// Map the crate's network type onto the `bitcoin` crate's.
@@ -71,6 +77,51 @@ pub(crate) fn xpub_to_hd_node_type(xpub: &str) -> Result<HDNodeType> {
         chain_code: data[13..45].to_vec(),
         public_key,
     })
+}
+
+/// Derive the scriptPubKey a single-sig output with the given script type and
+/// compressed public key must serialize to. Returns `None` for script types
+/// that can't be derived from one key (multisig, external), which callers
+/// treat as "skip script verification for this output" like JS
+/// `deriveOutputScript` does.
+pub(crate) fn script_for_pubkey(
+    public_key: &[u8],
+    script_type: ScriptType,
+) -> Result<Option<ScriptBuf>> {
+    let pk = PublicKey::from_slice(public_key).map_err(|e| {
+        BitcoinError::InvalidTransaction(format!("invalid device public key: {}", e))
+    })?;
+
+    let wpkh = || {
+        pk.wpubkey_hash().map_err(|_| {
+            BitcoinError::InvalidTransaction("device public key is uncompressed".to_string())
+        })
+    };
+
+    let script = match script_type {
+        ScriptType::SpendAddress => Some(ScriptBuf::new_p2pkh(&pk.pubkey_hash())),
+        ScriptType::SpendWitness => Some(ScriptBuf::new_p2wpkh(&wpkh()?)),
+        ScriptType::SpendP2SHWitness => {
+            let redeem = ScriptBuf::new_p2wpkh(&wpkh()?);
+            Some(ScriptBuf::new_p2sh(&redeem.script_hash()))
+        }
+        ScriptType::SpendTaproot => {
+            let secp = Secp256k1::verification_only();
+            let internal_key = XOnlyPublicKey::from(pk.inner);
+            // BIP-86 key-path spend: tweak with an empty merkle root
+            Some(ScriptBuf::new_p2tr(&secp, internal_key, None))
+        }
+        _ => None,
+    };
+    Ok(script)
+}
+
+/// Build the OP_RETURN scriptPubKey for the given data payload.
+pub(crate) fn op_return_script(data: &[u8]) -> Result<ScriptBuf> {
+    let push = PushBytesBuf::try_from(data.to_vec()).map_err(|_| {
+        BitcoinError::InvalidTransaction("OP_RETURN data exceeds push limit".to_string())
+    })?;
+    Ok(ScriptBuf::new_op_return(&push))
 }
 
 /// Rebuild a caller-supplied previous transaction and return its txid
@@ -261,6 +312,72 @@ mod tests {
         };
         let txid = compute_prev_txid(&prev).unwrap().unwrap();
         assert_eq!(txid, prev.hash);
+    }
+
+    #[test]
+    fn script_for_pubkey_matches_bip173_p2wpkh_vector() {
+        // BIP-173 example: P2WPKH of the secp256k1 generator point
+        let pubkey =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        let script = script_for_pubkey(&pubkey, ScriptType::SpendWitness)
+            .unwrap()
+            .unwrap();
+        let expected = address_to_script(
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            Network::Bitcoin,
+        )
+        .unwrap();
+        assert_eq!(script, expected);
+    }
+
+    #[test]
+    fn script_for_pubkey_matches_bip86_p2tr_vector() {
+        // BIP-86 test vector: account 0, first receiving address
+        let pubkey =
+            hex::decode("03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115")
+                .unwrap();
+        let script = script_for_pubkey(&pubkey, ScriptType::SpendTaproot)
+            .unwrap()
+            .unwrap();
+        let expected = address_to_script(
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+            Network::Bitcoin,
+        )
+        .unwrap();
+        assert_eq!(script, expected);
+    }
+
+    #[test]
+    fn script_for_pubkey_p2pkh_and_nested_segwit_are_consistent() {
+        let pubkey =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        let p2pkh = script_for_pubkey(&pubkey, ScriptType::SpendAddress)
+            .unwrap()
+            .unwrap();
+        assert!(p2pkh.is_p2pkh());
+        let nested = script_for_pubkey(&pubkey, ScriptType::SpendP2SHWitness)
+            .unwrap()
+            .unwrap();
+        assert!(nested.is_p2sh());
+    }
+
+    #[test]
+    fn script_for_pubkey_skips_underivable_types() {
+        let pubkey =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        assert_eq!(
+            script_for_pubkey(&pubkey, ScriptType::External).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn op_return_script_embeds_data() {
+        let script = op_return_script(b"hello").unwrap();
+        assert!(script.is_op_return());
     }
 
     #[test]

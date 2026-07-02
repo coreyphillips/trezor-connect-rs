@@ -122,6 +122,9 @@ pub mod psbt;
 // Bitcoin helpers shared by validation and verification (crate-internal)
 pub(crate) mod bitcoin_utils;
 
+// Post-sign verification of device-returned transactions (crate-internal)
+pub(crate) mod tx_verify;
+
 // Re-export error types
 pub use error::{Result, TrezorError};
 
