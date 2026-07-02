@@ -69,6 +69,10 @@ pub struct UsbTransport {
     call_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// THP device states for devices that negotiated THP (path -> state)
     thp_states: Arc<RwLock<HashMap<String, ThpDeviceState>>>,
+    /// Pairing credentials registered before the THP state exists
+    /// (path -> credentials). Applied when the state is created during the
+    /// handshake, so stored credentials can be injected before acquire.
+    pending_credentials: Arc<RwLock<HashMap<String, crate::protocol::thp::state::ThpCredentials>>>,
     /// Pairing code callback for THP pairing
     pairing_callback: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     /// Passphrase bound to the THP session at `ThpCreateNewSession` time.
@@ -90,6 +94,7 @@ impl UsbTransport {
             protocol: ProtocolV1::usb(),
             call_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             thp_states: Arc::new(RwLock::new(HashMap::new())),
+            pending_credentials: Arc::new(RwLock::new(HashMap::new())),
             pairing_callback: None,
             session_passphrase: Zeroizing::new(String::new()),
             session_on_device: false,
@@ -99,6 +104,46 @@ impl UsbTransport {
     /// Set the pairing code callback for THP devices.
     pub fn set_pairing_callback(&mut self, callback: Arc<dyn Fn() -> String + Send + Sync>) {
         self.pairing_callback = Some(callback);
+    }
+
+    /// Add pairing credentials for a device so the next THP handshake can
+    /// reconnect without re-pairing. Safe to call before acquire: the
+    /// credentials are held pending and applied when the THP state is
+    /// created during the handshake.
+    pub async fn add_device_credentials(
+        &self,
+        path: &str,
+        creds: crate::protocol::thp::state::ThpCredentials,
+    ) {
+        {
+            let mut states = self.thp_states.write().await;
+            if let Some(state) = states.get_mut(path) {
+                state
+                    .protocol
+                    .state_mut()
+                    .add_pairing_credentials(creds.clone());
+            }
+        }
+        self.pending_credentials
+            .write()
+            .await
+            .insert(path.to_string(), creds);
+    }
+
+    /// Get pairing credentials for a device (if any), e.g. to persist them
+    /// after a successful pairing.
+    pub async fn get_device_credentials(
+        &self,
+        path: &str,
+    ) -> Option<crate::protocol::thp::state::ThpCredentials> {
+        let states = self.thp_states.read().await;
+        states
+            .get(path)?
+            .protocol
+            .state()
+            .pairing_credentials()
+            .first()
+            .cloned()
     }
 
     /// Set the passphrase bound to the THP session created during acquire.
@@ -415,7 +460,50 @@ impl UsbTransport {
     }
 
     /// Perform the full THP handshake for a USB device.
+    /// Perform THP handshake with retry for TransportBusy.
+    ///
+    /// A cancelled or crashed handshake (ours or another host's) leaves the
+    /// device's channel occupied until its internal timeout expires
+    /// (observed 15-20 seconds on Safe 7 fw 2.10.0), during which new
+    /// handshakes fail with `TransportBusy (0x01)`. Retry with exponential
+    /// backoff long enough to ride that window out.
     async fn perform_thp_handshake(&self, path: &str) -> Result<()> {
+        const MAX_RETRIES: u32 = 6;
+        const BASE_DELAY_MS: u64 = 500;
+
+        let mut delay_ms = BASE_DELAY_MS;
+        for attempt in 1..=MAX_RETRIES {
+            match self.perform_thp_handshake_inner(path).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if e.to_string().contains("TransportBusy") && attempt < MAX_RETRIES {
+                        log::warn!(
+                            "[USB-THP] TransportBusy (attempt {}/{}), retrying in {}ms...",
+                            attempt,
+                            MAX_RETRIES,
+                            delay_ms
+                        );
+                        // Reset protocol state before retry (keeps pairing
+                        // credentials, clears channel/nonces/sync bits).
+                        {
+                            let mut states = self.thp_states.write().await;
+                            if let Some(state) = states.get_mut(path) {
+                                state.protocol.state_mut().reset();
+                                state.handshake_complete = false;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms *= 2;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        unreachable!("loop returns on every path")
+    }
+
+    async fn perform_thp_handshake_inner(&self, path: &str) -> Result<()> {
         log::info!("[USB-THP] Starting THP handshake...");
 
         // Step 1: Channel Allocation
@@ -466,6 +554,7 @@ impl UsbTransport {
 
         // Create THP state
         {
+            let pending = self.pending_credentials.read().await.get(path).cloned();
             let mut states = self.thp_states.write().await;
             let state = states
                 .entry(path.to_string())
@@ -474,6 +563,13 @@ impl UsbTransport {
                     handshake_complete: false,
                 });
             state.protocol.state_mut().set_channel(channel);
+            // Apply credentials registered before the state existed, so a
+            // stored pairing can be presented during this handshake.
+            if let Some(creds) = pending
+                && state.protocol.state().pairing_credentials().is_empty()
+            {
+                state.protocol.state_mut().add_pairing_credentials(creds);
+            }
         }
 
         // Step 2: Handshake Init
@@ -560,6 +656,42 @@ impl UsbTransport {
             tag,
         };
 
+        // Check for stored credentials for this device (to skip pairing on
+        // reconnect). Mirrors the Bluetooth transport; credential matching
+        // against the device's static key happens in handle_handshake_init.
+        let stored_credential = {
+            let states = self.thp_states.read().await;
+            let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
+            state
+                .protocol
+                .state()
+                .pairing_credentials()
+                .first()
+                .and_then(|creds| {
+                    let host_key = hex::decode(&creds.host_static_key).ok()?;
+                    let trezor_pubkey = hex::decode(&creds.trezor_static_public_key).ok()?;
+                    let credential = hex::decode(&creds.credential).ok()?;
+                    if host_key.len() == 32 && trezor_pubkey.len() == 32 {
+                        let mut key_array = [0u8; 32];
+                        key_array.copy_from_slice(&host_key);
+                        let mut trezor_array = [0u8; 32];
+                        trezor_array.copy_from_slice(&trezor_pubkey);
+                        Some(crate::protocol::thp::StoredCredential {
+                            host_static_key: key_array,
+                            trezor_static_public_key: trezor_array,
+                            credential,
+                        })
+                    } else {
+                        None
+                    }
+                })
+        };
+        if stored_credential.is_some() {
+            log::info!(
+                "[USB-THP] Found stored credentials - will attempt reconnection without pairing"
+            );
+        }
+
         let completion_req = {
             let mut states = self.thp_states.write().await;
             let state = states.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
@@ -568,7 +700,7 @@ impl UsbTransport {
                 &init_response,
                 &ephemeral_secret,
                 false, // try_to_unlock
-                None,  // no stored credentials for USB (fresh pairing)
+                stored_credential.as_ref(),
             )?
         };
 
@@ -915,6 +1047,38 @@ impl UsbTransport {
             "[USB-THP] Received pairing credential ({} bytes)",
             credential_data.len()
         );
+
+        // Decode and store the credential so future handshakes can reconnect
+        // without re-pairing (mirrors the Bluetooth transport).
+        match crate::protocol::thp::pairing_messages::decode_credential_response(&credential_data) {
+            Ok((trezor_pubkey, credential)) => {
+                let mut states = self.thp_states.write().await;
+                let state = states.get_mut(path).ok_or(TransportError::DeviceNotFound)?;
+                let host_static_private_key = state
+                    .protocol
+                    .state()
+                    .handshake_credentials()
+                    .map(|c| c.static_key.clone())
+                    .unwrap_or_default();
+                let stored_creds = crate::protocol::thp::state::ThpCredentials {
+                    host_static_key: hex::encode(&host_static_private_key),
+                    trezor_static_public_key: hex::encode(&trezor_pubkey),
+                    credential: hex::encode(&credential),
+                    autoconnect: false,
+                };
+                state
+                    .protocol
+                    .state_mut()
+                    .set_pairing_credentials(stored_creds);
+                log::info!("[USB-THP] Stored pairing credentials for future reconnection");
+            }
+            Err(e) => {
+                log::warn!(
+                    "[USB-THP] Could not decode credential response ({}); re-pairing will be required next time",
+                    e
+                );
+            }
+        }
 
         // Step 8: Send ThpEndRequest
         let (end_type, _) = self

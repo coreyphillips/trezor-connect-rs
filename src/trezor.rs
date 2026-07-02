@@ -359,16 +359,56 @@ impl Trezor {
     /// Connect to a USB device.
     #[cfg(feature = "usb")]
     async fn connect_usb(&mut self, device: &DeviceInfo) -> Result<ConnectedDevice> {
+        use crate::protocol::thp::state::ThpCredentials;
+
         let transport = self
             .usb_transport
             .as_ref()
             .ok_or_else(|| TransportError::Usb("USB transport not initialized".to_string()))?;
+
+        // Load stored THP pairing credentials if available, so a THP device
+        // (Safe 5/7 over USB) can reconnect without re-pairing. No-op for
+        // protocol-v1 devices.
+        if let Some(ref store) = self.credential_store {
+            if let Some(cred) = store.get(&device.path) {
+                log::info!("Found stored credentials for device {}", device.path);
+                let thp_creds = ThpCredentials {
+                    host_static_key: cred.host_static_key.clone(),
+                    trezor_static_public_key: cred.trezor_static_public_key.clone(),
+                    credential: cred.credential.clone(),
+                    autoconnect: false,
+                };
+                transport
+                    .add_device_credentials(&device.path, thp_creds)
+                    .await;
+            }
+        }
 
         // Acquire session (this also detects THP and performs handshake if needed)
         let session = transport.acquire(&device.path, None).await?;
 
         // Check if device negotiated THP during acquire
         let uses_thp = transport.has_thp(&device.path).await;
+
+        // Persist pairing credentials after a successful THP connection so the
+        // next process run skips pairing.
+        if uses_thp {
+            if let Some(ref mut store) = self.credential_store {
+                if let Some(creds) = transport.get_device_credentials(&device.path).await {
+                    let stored = StoredCredential::new(
+                        device.path.clone(),
+                        creds.host_static_key.clone(),
+                        creds.trezor_static_public_key.clone(),
+                        creds.credential.clone(),
+                    );
+                    if let Err(e) = store.store(stored) {
+                        log::warn!("Failed to save credentials: {}", e);
+                    } else {
+                        log::info!("Saved credentials for device {}", device.path);
+                    }
+                }
+            }
+        }
 
         let mut connected = ConnectedDevice::new(
             device.clone(),

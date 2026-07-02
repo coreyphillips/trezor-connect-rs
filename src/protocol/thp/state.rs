@@ -288,6 +288,14 @@ impl ThpState {
         self.pairing_credentials.push(creds);
     }
 
+    /// Replace all pairing credentials with a freshly issued one. Used after
+    /// a successful pairing so a stale credential (e.g. one the device
+    /// rejected, forcing the re-pair) is not kept in front of the new one.
+    pub fn set_pairing_credentials(&mut self, creds: ThpCredentials) {
+        self.pairing_credentials.clear();
+        self.pairing_credentials.push(creds);
+    }
+
     /// Set pairing method
     pub fn set_pairing_method(&mut self, method: ThpPairingMethod) {
         self.selected_method = Some(method);
