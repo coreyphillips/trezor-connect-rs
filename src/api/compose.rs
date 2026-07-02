@@ -688,12 +688,12 @@ mod tests {
                     lock_time: None,
                     version: None,
                     prev_txs: test_prev_txs(),
-                    push: None,
                     amount_unit: None,
                     serialize: None,
                     chunkify: None,
                     unlock_path: None,
                     payment_requests: vec![],
+                    ..Default::default()
                 };
 
                 // Validate the constructed params
@@ -934,12 +934,12 @@ mod tests {
             lock_time: None,
             version: None,
             prev_txs: test_prev_txs(),
-            push: None,
             amount_unit: None,
             serialize: None,
             chunkify: None,
             unlock_path: None,
             payment_requests: vec![],
+            ..Default::default()
         };
 
         println!(

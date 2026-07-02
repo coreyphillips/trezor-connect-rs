@@ -18,10 +18,14 @@ pub struct PushedTransaction {
     pub txid: String,
 }
 
-/// Push a transaction to the network
+/// Push a transaction to the network.
+///
+/// **Not implemented**: this crate has no blockchain backend. Broadcast the
+/// signed transaction through your own chain source (e.g. Electrum or
+/// Blockbook).
+#[deprecated(note = "No blockchain backend in this crate; broadcast externally")]
 pub async fn push_transaction(_params: PushTransactionParams) -> Result<PushedTransaction> {
-    // TODO: Implement - requires blockchain connection
-    Ok(PushedTransaction {
-        txid: String::new(),
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::push_transaction; this crate has no blockchain backend",
+    ))
 }

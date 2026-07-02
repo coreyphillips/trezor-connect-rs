@@ -22,16 +22,26 @@ pub struct AuthorizeCoinJoinParams {
     pub script_type: ScriptType,
 }
 
-/// Authorize a CoinJoin session
+/// Authorize a CoinJoin session.
+///
+/// **Not implemented**: the AuthorizeCoinJoin protobuf exists but no device
+/// flow is wired up yet.
+#[deprecated(note = "Not implemented; returns an error")]
 pub async fn authorize_coinjoin(_params: AuthorizeCoinJoinParams) -> Result<()> {
-    // TODO: Implement
-    Ok(())
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::authorize_coinjoin",
+    ))
 }
 
-/// Cancel CoinJoin authorization
+/// Cancel CoinJoin authorization.
+///
+/// **Not implemented**: the CancelAuthorization protobuf exists but no device
+/// flow is wired up yet.
+#[deprecated(note = "Not implemented; returns an error")]
 pub async fn cancel_coinjoin_authorization() -> Result<()> {
-    // TODO: Implement
-    Ok(())
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::cancel_coinjoin_authorization",
+    ))
 }
 
 /// Parameters for get_ownership_id
@@ -52,12 +62,15 @@ pub struct OwnershipId {
     pub ownership_id: String,
 }
 
-/// Get ownership ID
+/// Get ownership ID.
+///
+/// **Not implemented**: the GetOwnershipId protobuf exists but no device
+/// flow is wired up yet.
+#[deprecated(note = "Not implemented; returns an error")]
 pub async fn get_ownership_id(_params: GetOwnershipIdParams) -> Result<OwnershipId> {
-    // TODO: Implement
-    Ok(OwnershipId {
-        ownership_id: String::new(),
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::get_ownership_id",
+    ))
 }
 
 /// Parameters for get_ownership_proof
@@ -80,10 +93,13 @@ pub struct OwnershipProof {
     pub ownership_proof: String,
 }
 
-/// Get ownership proof
+/// Get ownership proof.
+///
+/// **Not implemented**: the GetOwnershipProof protobuf exists but no device
+/// flow is wired up yet.
+#[deprecated(note = "Not implemented; returns an error")]
 pub async fn get_ownership_proof(_params: GetOwnershipProofParams) -> Result<OwnershipProof> {
-    // TODO: Implement
-    Ok(OwnershipProof {
-        ownership_proof: String::new(),
-    })
+    Err(crate::error::TrezorError::NotImplemented(
+        "api::get_ownership_proof",
+    ))
 }
