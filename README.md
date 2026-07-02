@@ -19,7 +19,7 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 
 ```toml
 [dependencies]
-trezor-connect-rs = "0.3.0"
+trezor-connect-rs = "0.4.0"
 ```
 
 ### Feature Flags
@@ -32,16 +32,16 @@ trezor-connect-rs = "0.3.0"
 
 ```toml
 # Default: USB + Bluetooth
-trezor-connect-rs = "0.3"
+trezor-connect-rs = "0.4"
 
 # USB only (e.g., for iOS where libusb isn't available)
-trezor-connect-rs = { version = "0.3", default-features = false, features = ["usb"] }
+trezor-connect-rs = { version = "0.4", default-features = false, features = ["usb"] }
 
 # Bluetooth only
-trezor-connect-rs = { version = "0.3", default-features = false, features = ["bluetooth"] }
+trezor-connect-rs = { version = "0.4", default-features = false, features = ["bluetooth"] }
 
 # With OS keychain for credential storage
-trezor-connect-rs = { version = "0.3", features = ["os-keychain"] }
+trezor-connect-rs = { version = "0.4", features = ["os-keychain"] }
 ```
 
 ## Quick Start
