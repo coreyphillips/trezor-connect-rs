@@ -1579,10 +1579,13 @@ impl BluetoothTransport {
                 credential: hex::encode(&credential),
                 autoconnect: false,
             };
+            // Replace (not append): if a stale stored credential forced this
+            // re-pair, appending would leave it first in the list and it
+            // would keep being presented and re-saved.
             device
                 .protocol
                 .state_mut()
-                .add_pairing_credentials(stored_creds);
+                .set_pairing_credentials(stored_creds);
             log::info!("[BLE] Stored pairing credentials for future reconnection");
         }
 
