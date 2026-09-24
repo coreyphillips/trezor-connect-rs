@@ -1,11 +1,12 @@
 //! Get account info API.
 
-use crate::error::Result;
+use crate::error::{DeviceError, Result, TrezorError};
+use crate::types::network::Network;
 
 /// Parameters for get_account_info
 #[derive(Debug, Clone)]
 pub struct GetAccountInfoParams {
-    /// Coin name
+    /// Coin shortcut (`btc`, `test`, `regtest`). Names such as `Bitcoin` are rejected.
     pub coin: String,
     /// Derivation path (optional)
     pub path: Option<String>,
@@ -51,8 +52,47 @@ pub struct AccountInfo {
 /// (balances, UTXOs) must be fetched by the caller from their own chain
 /// source (e.g. Electrum or Blockbook).
 #[deprecated(note = "No blockchain backend in this crate; fetch account data externally")]
-pub async fn get_account_info(_params: GetAccountInfoParams) -> Result<AccountInfo> {
-    Err(crate::error::TrezorError::NotImplemented(
+pub async fn get_account_info(params: GetAccountInfoParams) -> Result<AccountInfo> {
+    Network::from_shortcut(&params.coin).ok_or(DeviceError::UnknownCoin)?;
+    if params.path.is_none() && params.descriptor.is_none() {
+        return Err(DeviceError::InvalidParameter(
+            "GetAccountInfo: path or descriptor is required".into(),
+        )
+        .into());
+    }
+    Err(TrezorError::NotImplemented(
         "api::get_account_info; this crate has no blockchain backend",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)]
+    fn get_account_info_rejects_coin_name() {
+        let err = futures::executor::block_on(get_account_info(GetAccountInfoParams {
+            coin: "Bitcoin".into(),
+            path: Some("m/84'/0'/0'".into()),
+            descriptor: None,
+        }))
+        .unwrap_err();
+        assert!(matches!(err, TrezorError::Device(DeviceError::UnknownCoin)));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn get_account_info_requires_path_or_descriptor() {
+        let err = futures::executor::block_on(get_account_info(GetAccountInfoParams {
+            coin: "btc".into(),
+            path: None,
+            descriptor: None,
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            TrezorError::Device(DeviceError::InvalidParameter(_))
+        ));
+    }
 }

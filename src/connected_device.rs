@@ -16,8 +16,43 @@ use crate::protos::{self, MessageType};
 use crate::responses::*;
 use crate::transport::Transport;
 use crate::types::bitcoin::{OutputScriptType, ScriptType};
+use crate::types::network::Network;
 use crate::types::path::{parse_path, serialize_path};
 use crate::ui_callback::TrezorUiCallback;
+
+/// Connect 10: an explicit coin must agree with the path's SLIP-44 coin type.
+/// When `coin` is omitted, the network is taken from the path. There is no
+/// fallback to Bitcoin for an unrecognized path.
+fn resolve_coin(explicit: Option<Network>, path: &[u32]) -> Result<Network> {
+    if let Some(coin) = explicit {
+        if let Some(from_path) = Network::from_derivation_path(path) {
+            if from_path.coin_type() != coin.coin_type() {
+                return Err(DeviceError::InvalidParameter(
+                    "coin does not match derivation path".into(),
+                )
+                .into());
+            }
+        }
+        return Ok(coin);
+    }
+    Network::from_derivation_path(path).ok_or_else(|| DeviceError::UnknownCoin.into())
+}
+
+/// `signTransaction` requires a bitcoin-like coin. An omitted coin is taken
+/// from the first input path instead of defaulting to Bitcoin.
+fn resolve_sign_coin(params: &SignTxParams) -> Result<Network> {
+    if let Some(coin) = params.coin {
+        return Ok(coin);
+    }
+    for input in &params.inputs {
+        if input.path.is_empty() {
+            continue;
+        }
+        let path = parse_path(&input.path)?;
+        return Network::from_derivation_path(&path).ok_or_else(|| DeviceError::UnknownCoin.into());
+    }
+    Err(DeviceError::UnknownCoin.into())
+}
 
 /// A connected Trezor device with high-level API methods.
 ///
@@ -146,7 +181,9 @@ impl ConnectedDevice {
         let script_type = params
             .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n)?
+            .coin_name()
+            .to_string();
         let multisig = params.multisig.as_ref().map(convert_multisig).transpose()?;
 
         let build_request = |show_display: bool| protos::bitcoin::GetAddress {
@@ -292,7 +329,9 @@ impl ConnectedDevice {
         let script_type = params
             .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n)?
+            .coin_name()
+            .to_string();
 
         let request = protos::bitcoin::GetPublicKey {
             address_n: address_n.clone(),
@@ -315,10 +354,17 @@ impl ConnectedDevice {
         let response: protos::bitcoin::PublicKey =
             self.handle_response(resp_type, resp_data).await?;
 
+        let descriptor = response.descriptor.clone();
+        let (xpub, xpub_segwit, displayable_public_key) =
+            crate::xpub_form::public_key_forms(&response.xpub, script_type, descriptor.clone());
+
         Ok(PublicKeyResponse {
             path: address_n.clone(),
             serialized_path: serialize_path(&address_n),
-            xpub: response.xpub,
+            xpub,
+            xpub_segwit,
+            descriptor,
+            displayable_public_key,
             chain_code: hex::encode(&response.node.chain_code),
             public_key: hex::encode(&response.node.public_key),
             depth: response.node.depth,
@@ -342,7 +388,9 @@ impl ConnectedDevice {
     pub async fn sign_message(&self, params: SignMessageParams) -> Result<SignedMessageResponse> {
         let address_n = parse_path(&params.path)?;
         let script_type = infer_script_type(&address_n);
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n)?
+            .coin_name()
+            .to_string();
 
         // Model One firmware rejects messages over 1024 bytes; fail fast like
         // JS validateModelOneMessageSize does.
@@ -412,7 +460,11 @@ impl ConnectedDevice {
             .decode(&params.signature)
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid base64 signature: {}", e)))?;
 
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = params
+            .coin
+            .ok_or(DeviceError::UnknownCoin)?
+            .coin_name()
+            .to_string();
 
         let request = protos::bitcoin::VerifyMessage {
             address: params.address,
@@ -473,7 +525,6 @@ impl ConnectedDevice {
     /// println!("Signed TX: {}", signed.serialized_tx);
     /// ```
     pub async fn sign_transaction(&self, params: SignTxParams) -> Result<SignedTxResponse> {
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
         let version = params.version.unwrap_or(2);
         let lock_time = params.lock_time.unwrap_or(0);
 
@@ -501,6 +552,7 @@ impl ConnectedDevice {
         }
 
         validate_sign_tx_params(&params)?;
+        let coin_name = resolve_sign_coin(&params)?.coin_name().to_string();
 
         // SLIP-24: when payment requests are present every output belongs to
         // the (single) request, so default payment_req_index to 0 like JS does.

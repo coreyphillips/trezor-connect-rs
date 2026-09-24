@@ -7,6 +7,7 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 - **USB** (Protocol v1) - Trezor Safe 5, Safe 3, Model T, Model One
 - **Bluetooth** (THP v2, Noise XX encrypted) - Trezor Safe 7
 - **Bitcoin operations** - address generation, transaction signing, message signing/verification, xpub derivation
+- **Connect 10 coin shortcuts** - `btc`, `test`, and `regtest` (names such as `Bitcoin` are rejected). `get_address` and `get_public_key` derive the network from the path when `coin` is omitted. `verify_message` requires a coin. Public keys include `displayable_public_key`.
 - **Credential persistence** - file-based or OS keychain, for skipping Bluetooth re-pairing
 
 ## Requirements
@@ -19,7 +20,7 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 
 ```toml
 [dependencies]
-trezor-connect-rs = "0.4.0"
+trezor-connect-rs = "10.0.0"
 ```
 
 ### Feature Flags
@@ -32,16 +33,16 @@ trezor-connect-rs = "0.4.0"
 
 ```toml
 # Default: USB + Bluetooth
-trezor-connect-rs = "0.4"
+trezor-connect-rs = "10.0"
 
 # USB only (e.g., for iOS where libusb isn't available)
-trezor-connect-rs = { version = "0.4", default-features = false, features = ["usb"] }
+trezor-connect-rs = { version = "10.0", default-features = false, features = ["usb"] }
 
 # Bluetooth only
-trezor-connect-rs = { version = "0.4", default-features = false, features = ["bluetooth"] }
+trezor-connect-rs = { version = "10.0", default-features = false, features = ["bluetooth"] }
 
 # With OS keychain for credential storage
-trezor-connect-rs = { version = "0.4", features = ["os-keychain"] }
+trezor-connect-rs = { version = "10.0", features = ["os-keychain"] }
 ```
 
 ## Quick Start
@@ -129,6 +130,7 @@ let valid = device.verify_message(VerifyMessageParams {
     address: signed.address,
     signature: signed.signature,
     message: "Hello".into(),
+    coin: Some(Network::Bitcoin),
     ..Default::default()
 }).await?;
 

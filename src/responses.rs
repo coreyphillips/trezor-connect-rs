@@ -26,8 +26,17 @@ pub struct PublicKeyResponse {
     pub path: Vec<u32>,
     /// The serialized path (e.g., "m/84'/0'/0'")
     pub serialized_path: String,
-    /// Extended public key (xpub)
+    /// Extended public key in legacy form (`xpub` / `tpub`).
     pub xpub: String,
+    /// SLIP-132 form (`ypub` / `zpub` / `upub` / `vpub`) when it differs from [`Self::xpub`].
+    /// For Taproot this is the account descriptor when firmware returned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xpub_segwit: Option<String>,
+    /// BIP-380 descriptor returned by firmware. Bitcoin only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<String>,
+    /// User-facing key: SLIP-132 xpub, or the Taproot descriptor when present.
+    pub displayable_public_key: String,
     /// Chain code (hex encoded)
     pub chain_code: String,
     /// Compressed public key (hex encoded)

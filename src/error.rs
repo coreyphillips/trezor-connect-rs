@@ -207,6 +207,16 @@ pub enum DeviceError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// Coin shortcut did not resolve to a bitcoin-like network.
+    /// Mirrors trezor-connect's `Method_UnknownCoin`.
+    #[error("Method_UnknownCoin")]
+    UnknownCoin,
+
+    /// A required parameter was missing or inconsistent.
+    /// Mirrors trezor-connect's `Method_InvalidParameter`.
+    #[error("Method_InvalidParameter: {0}")]
+    InvalidParameter(String),
+
     /// The device returned an address that differs from the expected one.
     /// Mirrors trezor-suite's `Method_AddressNotMatch`.
     #[error(
