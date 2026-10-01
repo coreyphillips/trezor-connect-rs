@@ -589,6 +589,24 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn precompose_rejects_coin_names() {
+        let params = PrecomposeParams {
+            outputs: vec![],
+            coin: "Bitcoin".into(),
+            account: test_account(),
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".into(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
+            sequence: None,
+            sorting_strategy: None,
+        };
+        assert!(matches!(precompose(params).as_slice(),
+            [PrecomposedResult::Error { error }] if error == "Method_UnknownCoin"));
+    }
+
     /// Test that precompose produces a valid Final result using real regtest account data.
     /// No device needed — pure offline composition.
     #[test]

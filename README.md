@@ -7,7 +7,7 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 - **USB** (Protocol v1) - Trezor Safe 5, Safe 3, Model T, Model One
 - **Bluetooth** (THP v2, Noise XX encrypted) - Trezor Safe 7
 - **Bitcoin operations** - address generation, transaction signing, message signing/verification, xpub derivation
-- **Connect 10 coin shortcuts** - `btc`, `test`, and `regtest` (names such as `Bitcoin` are rejected). `get_address` and `get_public_key` derive the network from the path when `coin` is omitted. `verify_message` requires a coin. Public keys include `displayable_public_key`.
+- **Connect 10 coin shortcuts** - `btc`, `test`, and `regtest` (names such as `Bitcoin` are rejected). Device methods infer the network from derivation paths when `coin` is omitted. `verify_message` requires a coin. Public keys include `displayable_public_key`.
 - **Credential persistence** - file-based or OS keychain, for skipping Bluetooth re-pairing
 
 ## Requirements
@@ -22,6 +22,16 @@ A Rust library for communicating with Trezor hardware wallets. Bitcoin-only. Sup
 [dependencies]
 trezor-connect-rs = "10.0.0"
 ```
+
+### Migrating from 0.4 to 10.0
+
+- Rust device parameters still use `Network`. Its JSON representation now uses `"btc"`, `"test"`, or `"regtest"`, matching string-typed coin fields such as `PrecomposeParams.coin`. Shortcuts are case-insensitive. `"Bitcoin"` and `"Testnet"` are rejected.
+- `get_address`, `get_public_key`, and `sign_message` infer Bitcoin or Testnet from the path when `coin` is omitted. Explicit coins must match the path's coin type unless `cross_chain: true` is set. This option permits cross-network exports and custom paths. It does not change inference when `coin` is omitted.
+- Short paths such as `m/0'` retain the Rust API's Bitcoin default. BIP-45 paths also default to Bitcoin because their second component is a cosigner index, not a coin type. Set `coin` explicitly for another network. These compatibility defaults intentionally differ from Connect 10's path lookup.
+- `sign_transaction` infers the network from the first nonempty input path when `coin` is omitted and uses that network for output validation, change-key derivation, and signing. Paths for other coins return `Method_UnknownCoin`. Set `coin: Some(Network::Regtest)` for Regtest because SLIP-44 coin type `1` otherwise selects Testnet. Transactions with only pathless inputs need an explicit coin.
+- `verify_message` requires `coin`, for example `coin: Some(Network::Bitcoin)`. Omission returns `Method_InvalidParameter`.
+- `ConnectedDevice::get_public_key` now returns a legacy `xpub` or `tpub` in `PublicKeyResponse.xpub`. For BIP-49 and BIP-84, the firmware's `ypub`, `zpub`, `upub`, or `vpub` moves to `xpub_segwit` and `displayable_public_key`. Callers selecting a script type from a prefix should use those fields or the derivation path. Taproot uses the firmware descriptor for display when available. The low-level `TrezorClient::get_public_key` methods continue returning the raw firmware string.
+- `get_account_info` requires a path or descriptor. This crate remains Bitcoin-only and does not add Suite-hosted account selection or other coins.
 
 ### Feature Flags
 

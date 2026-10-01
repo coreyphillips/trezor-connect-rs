@@ -255,13 +255,14 @@ impl<T: Transport> TrezorClient<T> {
         Ok(response.address)
     }
 
-    /// Get public key (xpub)
+    /// Get the raw firmware public key, including its SLIP-132 version prefix.
+    /// Unlike `ConnectedDevice::get_public_key`, this does not normalize to `xpub`/`tpub`.
     pub async fn get_public_key(&self, path: &str) -> Result<String> {
         self.get_public_key_full(path, "Bitcoin", ScriptType::SpendWitness, false)
             .await
     }
 
-    /// Get public key with full options
+    /// Get the raw firmware public key with full options.
     pub async fn get_public_key_full(
         &self,
         path: &str,

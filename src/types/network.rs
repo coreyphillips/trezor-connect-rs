@@ -3,19 +3,31 @@
 use serde::{Deserialize, Serialize};
 
 /// Bitcoin network type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum Network {
     #[default]
+    #[serde(rename = "btc")]
     Bitcoin,
+    #[serde(rename = "test")]
     Testnet,
+    #[serde(rename = "regtest")]
     Regtest,
+}
+
+impl<'de> Deserialize<'de> for Network {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let shortcut = String::deserialize(deserializer)?;
+        Self::from_shortcut(&shortcut)
+            .ok_or_else(|| serde::de::Error::custom("expected btc, test, or regtest"))
+    }
 }
 
 impl Network {
     /// Firmware coin name (`GetAddress.coin_name` and friends).
     ///
     /// This is the protobuf field, not the Connect 10 public shortcut.
-    /// Callers pass [`Self::shortcut`] (`btc`, `test`, `regtest`).
+    /// Rust device parameters take this enum. Its serde representation uses
+    /// [`Self::shortcut`] (`btc`, `test`, `regtest`).
     pub fn coin_name(&self) -> &'static str {
         match self {
             Network::Bitcoin => "Bitcoin",
@@ -24,7 +36,7 @@ impl Network {
         }
     }
 
-    /// Connect 10 coin shortcut. Matching is case-insensitive.
+    /// Connect 10 coin shortcut.
     pub fn shortcut(&self) -> &'static str {
         match self {
             Network::Bitcoin => "btc",
@@ -33,7 +45,7 @@ impl Network {
         }
     }
 
-    /// Resolve a Connect 10 coin shortcut.
+    /// Resolve a Connect 10 coin shortcut, case-insensitively.
     ///
     /// Names and labels (`Bitcoin`, `Testnet`) are not accepted.
     pub fn from_shortcut(raw: &str) -> Option<Self> {
@@ -49,14 +61,21 @@ impl Network {
     ///
     /// Only Bitcoin coin types are recognized. SLIP-44 `1` is both testnet
     /// and regtest; the path selects testnet. Pass `regtest` explicitly for
-    /// regtest. Any other coin type returns `None`.
+    /// regtest. Any other coin type returns `None`. Short paths and BIP-45
+    /// paths have no coin type and retain the Rust API's Bitcoin default.
     pub fn from_derivation_path(path: &[u32]) -> Option<Self> {
-        let slip44 = path.get(1)? & 0x7fff_ffff;
-        match slip44 {
-            0 => Some(Network::Bitcoin),
-            1 => Some(Network::Testnet),
+        match Self::path_coin_type(path) {
+            None | Some(0) => Some(Network::Bitcoin),
+            Some(1) => Some(Network::Testnet),
             _ => None,
         }
+    }
+
+    pub(crate) fn path_coin_type(path: &[u32]) -> Option<u32> {
+        if path.first().map(|purpose| purpose & 0x7fff_ffff) == Some(45) {
+            return None;
+        }
+        path.get(1).map(|coin_type| coin_type & 0x7fff_ffff)
     }
 
     /// Get the BIP44 coin type
@@ -184,5 +203,38 @@ mod tests {
             Some(Network::Testnet)
         );
         assert_eq!(Network::from_derivation_path(&other), None);
+    }
+
+    #[test]
+    fn paths_without_coin_type_default_to_bitcoin() {
+        for path in ["m", "m/0'", "m/45'/0/0/0", "m/45'/1/0/0", "m/45'/2/0/0"] {
+            let path = crate::types::path::parse_path(path).unwrap();
+            assert_eq!(Network::from_derivation_path(&path), Some(Network::Bitcoin));
+            assert_eq!(Network::path_coin_type(&path), None);
+        }
+    }
+
+    #[test]
+    fn serde_uses_case_insensitive_shortcuts() {
+        for (coin, shortcut) in [
+            (Network::Bitcoin, "btc"),
+            (Network::Testnet, "test"),
+            (Network::Regtest, "regtest"),
+        ] {
+            assert_eq!(serde_json::to_value(coin).unwrap(), shortcut);
+            for value in [shortcut.to_string(), shortcut.to_uppercase()] {
+                assert_eq!(
+                    serde_json::from_value::<Network>(value.into()).unwrap(),
+                    coin
+                );
+            }
+        }
+        assert_eq!(
+            serde_json::from_str::<Network>("\"ReGtEsT\"").unwrap(),
+            Network::Regtest
+        );
+        for name in ["Bitcoin", "Testnet", "ltc", ""] {
+            assert!(serde_json::from_value::<Network>(name.into()).is_err());
+        }
     }
 }
