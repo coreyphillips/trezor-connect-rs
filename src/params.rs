@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 pub struct GetAddressParams {
     /// BIP32 path (e.g., "m/84'/0'/0'/0/0")
     pub path: String,
-    /// Coin network (default: Bitcoin)
+    /// Coin network, inferred from the path when omitted.
     pub coin: Option<Network>,
+    /// Allow an explicit coin to differ from the path's coin type.
+    #[serde(default)]
+    pub cross_chain: bool,
     /// Whether to display the address on the device for confirmation
     pub show_on_trezor: bool,
     /// Script type (auto-detected from path if not specified)
@@ -33,8 +36,11 @@ pub struct GetAddressParams {
 pub struct GetPublicKeyParams {
     /// BIP32 path (e.g., "m/84'/0'/0'")
     pub path: String,
-    /// Coin network (default: Bitcoin)
+    /// Coin network, inferred from the path when omitted.
     pub coin: Option<Network>,
+    /// Allow an explicit coin to differ from the path's coin type.
+    #[serde(default)]
+    pub cross_chain: bool,
     /// Whether to display on device for confirmation
     pub show_on_trezor: bool,
     /// Script type (auto-detected from path if not specified)
@@ -48,8 +54,11 @@ pub struct SignMessageParams {
     pub path: String,
     /// Message to sign
     pub message: String,
-    /// Coin network (default: Bitcoin)
+    /// Coin network, inferred from the path when omitted.
     pub coin: Option<Network>,
+    /// Allow an explicit coin to differ from the path's coin type.
+    #[serde(default)]
+    pub cross_chain: bool,
     /// If true, don't include script type in the signature
     pub no_script_type: bool,
     /// Display the address in chunks of 4 characters on the device
@@ -66,7 +75,7 @@ pub struct VerifyMessageParams {
     pub signature: String,
     /// Original message
     pub message: String,
-    /// Coin network (default: Bitcoin)
+    /// Required coin network. Omission returns `DeviceError::InvalidParameter`.
     pub coin: Option<Network>,
     /// Display the address in chunks of 4 characters on the device
     /// (firmware 2.6.3+)
@@ -283,7 +292,8 @@ pub struct SignTxParams {
     pub inputs: Vec<SignTxInput>,
     /// Transaction outputs
     pub outputs: Vec<SignTxOutput>,
-    /// Coin network (default: Bitcoin)
+    /// Coin network, inferred from the first nonempty input path when omitted.
+    /// Regtest and transactions with only pathless inputs require an explicit coin.
     pub coin: Option<Network>,
     /// Lock time (default: 0)
     pub lock_time: Option<u32>,
@@ -311,6 +321,27 @@ pub struct SignTxParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_coin_shortcuts<T: Default + Serialize + serde::de::DeserializeOwned>() {
+        let mut json = serde_json::to_value(T::default()).unwrap();
+        json.as_object_mut().unwrap().remove("cross_chain");
+        for shortcut in ["btc", "test", "regtest"] {
+            json["coin"] = shortcut.into();
+            let params: T = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(params).unwrap()["coin"], shortcut);
+        }
+        json["coin"] = "Bitcoin".into();
+        assert!(serde_json::from_value::<T>(json).is_err());
+    }
+
+    #[test]
+    fn device_params_use_coin_shortcuts() {
+        assert_coin_shortcuts::<GetAddressParams>();
+        assert_coin_shortcuts::<GetPublicKeyParams>();
+        assert_coin_shortcuts::<SignMessageParams>();
+        assert_coin_shortcuts::<VerifyMessageParams>();
+        assert_coin_shortcuts::<SignTxParams>();
+    }
 
     #[test]
     fn test_get_address_params_default() {

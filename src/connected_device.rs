@@ -16,8 +16,43 @@ use crate::protos::{self, MessageType};
 use crate::responses::*;
 use crate::transport::Transport;
 use crate::types::bitcoin::{OutputScriptType, ScriptType};
+use crate::types::network::Network;
 use crate::types::path::{parse_path, serialize_path};
 use crate::ui_callback::TrezorUiCallback;
+
+/// Check explicit coins against SLIP-44 unless the caller opts out.
+/// Paths without a coin type retain the Rust API's Bitcoin default.
+fn resolve_coin(explicit: Option<Network>, path: &[u32], cross_chain: bool) -> Result<Network> {
+    if let Some(coin) = explicit {
+        if !cross_chain
+            && let Some(coin_type) = Network::path_coin_type(path)
+            && coin_type != coin.coin_type()
+        {
+            return Err(DeviceError::InvalidParameter(
+                "coin does not match derivation path".into(),
+            )
+            .into());
+        }
+        return Ok(coin);
+    }
+    Network::from_derivation_path(path).ok_or_else(|| DeviceError::UnknownCoin.into())
+}
+
+/// `signTransaction` requires a bitcoin-like coin. An omitted coin is taken
+/// from the first input path instead of defaulting to Bitcoin.
+fn resolve_sign_coin(params: &SignTxParams) -> Result<Network> {
+    if let Some(coin) = params.coin {
+        return Ok(coin);
+    }
+    for input in &params.inputs {
+        if input.path.is_empty() {
+            continue;
+        }
+        let path = parse_path(&input.path)?;
+        return Network::from_derivation_path(&path).ok_or_else(|| DeviceError::UnknownCoin.into());
+    }
+    Err(DeviceError::UnknownCoin.into())
+}
 
 /// A connected Trezor device with high-level API methods.
 ///
@@ -146,7 +181,9 @@ impl ConnectedDevice {
         let script_type = params
             .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n, params.cross_chain)?
+            .coin_name()
+            .to_string();
         let multisig = params.multisig.as_ref().map(convert_multisig).transpose()?;
 
         let build_request = |show_display: bool| protos::bitcoin::GetAddress {
@@ -292,7 +329,9 @@ impl ConnectedDevice {
         let script_type = params
             .script_type
             .unwrap_or_else(|| infer_script_type(&address_n));
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n, params.cross_chain)?
+            .coin_name()
+            .to_string();
 
         let request = protos::bitcoin::GetPublicKey {
             address_n: address_n.clone(),
@@ -315,10 +354,17 @@ impl ConnectedDevice {
         let response: protos::bitcoin::PublicKey =
             self.handle_response(resp_type, resp_data).await?;
 
+        let descriptor = response.descriptor.clone();
+        let (xpub, xpub_segwit, displayable_public_key) =
+            crate::xpub_form::public_key_forms(&response.xpub, script_type, descriptor.clone());
+
         Ok(PublicKeyResponse {
             path: address_n.clone(),
             serialized_path: serialize_path(&address_n),
-            xpub: response.xpub,
+            xpub,
+            xpub_segwit,
+            descriptor,
+            displayable_public_key,
             chain_code: hex::encode(&response.node.chain_code),
             public_key: hex::encode(&response.node.public_key),
             depth: response.node.depth,
@@ -342,7 +388,9 @@ impl ConnectedDevice {
     pub async fn sign_message(&self, params: SignMessageParams) -> Result<SignedMessageResponse> {
         let address_n = parse_path(&params.path)?;
         let script_type = infer_script_type(&address_n);
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
+        let coin_name = resolve_coin(params.coin, &address_n, params.cross_chain)?
+            .coin_name()
+            .to_string();
 
         // Model One firmware rejects messages over 1024 bytes; fail fast like
         // JS validateModelOneMessageSize does.
@@ -402,17 +450,21 @@ impl ConnectedDevice {
     ///     address: "bc1q...".into(),
     ///     signature: "H...".into(),
     ///     message: "Hello Bitcoin!".into(),
+    ///     coin: Some(Network::Bitcoin),
     ///     ..Default::default()
     /// }).await?;
     /// println!("Valid: {}", valid);
     /// ```
     pub async fn verify_message(&self, params: VerifyMessageParams) -> Result<bool> {
         use base64::Engine;
+        let coin_name = params
+            .coin
+            .ok_or_else(|| DeviceError::InvalidParameter("coin is required".into()))?
+            .coin_name()
+            .to_string();
         let signature_bytes = base64::engine::general_purpose::STANDARD
             .decode(&params.signature)
             .map_err(|e| DeviceError::InvalidInput(format!("Invalid base64 signature: {}", e)))?;
-
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
 
         let request = protos::bitcoin::VerifyMessage {
             address: params.address,
@@ -473,7 +525,6 @@ impl ConnectedDevice {
     /// println!("Signed TX: {}", signed.serialized_tx);
     /// ```
     pub async fn sign_transaction(&self, params: SignTxParams) -> Result<SignedTxResponse> {
-        let coin_name = params.coin.unwrap_or_default().coin_name().to_string();
         let version = params.version.unwrap_or(2);
         let lock_time = params.lock_time.unwrap_or(0);
 
@@ -500,7 +551,9 @@ impl ConnectedDevice {
             }
         }
 
-        validate_sign_tx_params(&params)?;
+        let coin = resolve_sign_coin(&params)?;
+        validate_sign_tx_params(&params, coin)?;
+        let coin_name = coin.coin_name().to_string();
 
         // SLIP-24: when payment requests are present every output belongs to
         // the (single) request, so default payment_req_index to 0 like JS does.
@@ -542,7 +595,10 @@ impl ConnectedDevice {
         // requests independent of the device (JS verifyTx parity). Skipped
         // when the caller opted out of serialization.
         let expected_scripts = if params.serialize != Some(false) {
-            Some(self.derive_output_scripts(&params, &parsed_outputs).await?)
+            Some(
+                self.derive_output_scripts(&params, &parsed_outputs, coin)
+                    .await?,
+            )
         } else {
             None
         };
@@ -1041,8 +1097,8 @@ impl ConnectedDevice {
         &self,
         params: &SignTxParams,
         parsed_outputs: &[Option<(Vec<u32>, ScriptType)>],
+        coin: Network,
     ) -> Result<Vec<Option<bitcoin::ScriptBuf>>> {
-        let coin = params.coin.unwrap_or_default();
         let mut scripts = Vec::with_capacity(params.outputs.len());
 
         for (output, parsed) in params.outputs.iter().zip(parsed_outputs) {
@@ -1547,9 +1603,7 @@ impl std::fmt::Debug for ConnectedDevice {
 
 /// Client-side validation performed before any message is sent to the device.
 /// Mirrors the checks `@trezor/connect` runs in `signTransaction`.
-fn validate_sign_tx_params(params: &SignTxParams) -> Result<()> {
-    let coin = params.coin.unwrap_or_default();
-
+fn validate_sign_tx_params(params: &SignTxParams, coin: Network) -> Result<()> {
     // Total spendable (non-OP_RETURN) output value must clear the dust limit.
     let spendable: Vec<u64> = params
         .outputs
@@ -1879,7 +1933,7 @@ mod tests {
                 let script_pubkey = if let Some(ref addr) = o.address {
                     crate::bitcoin_utils::address_to_script(
                         addr,
-                        crate::types::network::Network::Bitcoin,
+                        resolve_sign_coin(params).unwrap(),
                     )
                     .unwrap()
                 } else if let Some(ref data) = o.op_return_data {
@@ -2015,6 +2069,351 @@ mod tests {
     // ---- Pre-sign validation ----------------------------------------------
 
     #[tokio::test]
+    async fn get_address_infers_network_and_preserves_bip45_paths() {
+        for (path, coin, expected) in [
+            ("m/84'/0'/0'/0/0", None, "Bitcoin"),
+            ("m/84'/1'/0'/0/0", None, "Testnet"),
+            ("m/45'/0/0/0", None, "Bitcoin"),
+            ("m/45'/1/0/0", None, "Bitcoin"),
+            ("m/45'/2/0/0", None, "Bitcoin"),
+            ("m/45'/1/0/0", Some(Network::Bitcoin), "Bitcoin"),
+            ("m/45'/2/0/0", Some(Network::Testnet), "Testnet"),
+            ("m/84'/1'/0'/0/0", Some(Network::Regtest), "Regtest"),
+        ] {
+            let (device, mock) = mock_device(vec![ScriptedExchange {
+                expect_type: MessageType::GetAddress as u16,
+                reply_type: MessageType::Address as u16,
+                reply: protos::bitcoin::Address {
+                    address: "mock-address".into(),
+                    mac: None,
+                }
+                .encode_to_vec(),
+            }]);
+            device
+                .get_address(GetAddressParams {
+                    path: path.into(),
+                    coin,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let request =
+                protos::bitcoin::GetAddress::decode(mock.calls()[0].1.as_slice()).unwrap();
+            assert_eq!(request.coin_name.as_deref(), Some(expected), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_public_key_preserves_short_paths() {
+        for path in ["m", "m/0'", "m/84'/1'/0'"] {
+            let (device, mock) = mock_device(vec![ScriptedExchange {
+                expect_type: MessageType::GetPublicKey as u16,
+                reply_type: MessageType::PublicKey as u16,
+                reply: public_key_reply(),
+            }]);
+            device
+                .get_public_key(GetPublicKeyParams {
+                    path: path.into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let request =
+                protos::bitcoin::GetPublicKey::decode(mock.calls()[0].1.as_slice()).unwrap();
+            let expected = if path == "m/84'/1'/0'" {
+                "Testnet"
+            } else {
+                "Bitcoin"
+            };
+            assert_eq!(request.coin_name.as_deref(), Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn get_public_key_maps_legacy_segwit_and_descriptor_fields() {
+        let golden = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        for (version, legacy, path, descriptor) in [
+            (0x0488b21e_u32, 0x0488b21e_u32, "m/44'/0'/0'", None),
+            (0x049d7cb2, 0x0488b21e, "m/49'/0'/0'", None),
+            (0x04b24746, 0x0488b21e, "m/84'/0'/0'", None),
+            (0x043587cf, 0x043587cf, "m/44'/1'/0'", None),
+            (0x044a5262, 0x043587cf, "m/49'/1'/0'", None),
+            (0x045f1cf6, 0x043587cf, "m/84'/1'/0'", None),
+            (
+                0x0488b21e,
+                0x0488b21e,
+                "m/86'/0'/0'",
+                Some("tr(mock-key/0/*)"),
+            ),
+        ] {
+            let mut payload = bitcoin::base58::decode_check(golden).unwrap();
+            payload[..4].copy_from_slice(&version.to_be_bytes());
+            let firmware_xpub = bitcoin::base58::encode_check(&payload);
+            payload[..4].copy_from_slice(&legacy.to_be_bytes());
+            let expected_xpub = bitcoin::base58::encode_check(&payload);
+            let mut reply =
+                protos::bitcoin::PublicKey::decode(public_key_reply().as_slice()).unwrap();
+            reply.xpub = firmware_xpub.clone();
+            reply.descriptor = descriptor.map(str::to_string);
+            let (device, mock) = mock_device(vec![ScriptedExchange {
+                expect_type: MessageType::GetPublicKey as u16,
+                reply_type: MessageType::PublicKey as u16,
+                reply: reply.encode_to_vec(),
+            }]);
+            let response = device
+                .get_public_key(GetPublicKeyParams {
+                    path: path.into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.xpub, expected_xpub);
+            assert_eq!(
+                response.displayable_public_key,
+                descriptor.unwrap_or(&firmware_xpub)
+            );
+            let expected_segwit =
+                descriptor.or_else(|| (version != legacy).then_some(firmware_xpub.as_str()));
+            assert_eq!(response.xpub_segwit.as_deref(), expected_segwit);
+            assert_eq!(response.descriptor.as_deref(), descriptor);
+            assert_eq!(mock.remaining(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn device_methods_reject_unknown_coin_paths_without_calls() {
+        let (device, mock) = mock_device(vec![]);
+        let path = "m/44'/60'/0'/0/0";
+        let address = device
+            .get_address(GetAddressParams {
+                path: path.into(),
+                ..Default::default()
+            })
+            .await;
+        let key = device
+            .get_public_key(GetPublicKeyParams {
+                path: path.into(),
+                ..Default::default()
+            })
+            .await;
+        let message = device
+            .sign_message(SignMessageParams {
+                path: path.into(),
+                ..Default::default()
+            })
+            .await;
+        for err in [address.unwrap_err(), key.unwrap_err(), message.unwrap_err()] {
+            assert!(matches!(
+                err,
+                crate::error::TrezorError::Device(DeviceError::UnknownCoin)
+            ));
+        }
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_path_mismatch_requires_cross_chain() {
+        for path in ["m/84'/1'/0'/0/0", "m/44'/60'/0'/0/0"] {
+            let (device, mock) = mock_device(vec![]);
+            let address = device
+                .get_address(GetAddressParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    ..Default::default()
+                })
+                .await;
+            let key = device
+                .get_public_key(GetPublicKeyParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    ..Default::default()
+                })
+                .await;
+            let message = device
+                .sign_message(SignMessageParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    ..Default::default()
+                })
+                .await;
+            for err in [address.unwrap_err(), key.unwrap_err(), message.unwrap_err()] {
+                assert!(matches!(
+                    err,
+                    crate::error::TrezorError::Device(DeviceError::InvalidParameter(_))
+                ));
+            }
+            assert!(mock.calls().is_empty());
+
+            let (device, mock) = mock_device(vec![
+                ScriptedExchange {
+                    expect_type: MessageType::GetAddress as u16,
+                    reply_type: MessageType::Address as u16,
+                    reply: protos::bitcoin::Address {
+                        address: "mock-address".into(),
+                        mac: None,
+                    }
+                    .encode_to_vec(),
+                },
+                ScriptedExchange {
+                    expect_type: MessageType::GetPublicKey as u16,
+                    reply_type: MessageType::PublicKey as u16,
+                    reply: public_key_reply(),
+                },
+                ScriptedExchange {
+                    expect_type: MessageType::SignMessage as u16,
+                    reply_type: MessageType::MessageSignature as u16,
+                    reply: protos::bitcoin::MessageSignature {
+                        address: "mock-address".into(),
+                        signature: vec![1],
+                    }
+                    .encode_to_vec(),
+                },
+            ]);
+            device
+                .get_address(GetAddressParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    cross_chain: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            device
+                .get_public_key(GetPublicKeyParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    cross_chain: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            device
+                .sign_message(SignMessageParams {
+                    path: path.into(),
+                    coin: Some(Network::Bitcoin),
+                    cross_chain: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let calls = mock.calls();
+            assert_eq!(
+                protos::bitcoin::GetAddress::decode(calls[0].1.as_slice())
+                    .unwrap()
+                    .coin_name
+                    .as_deref(),
+                Some("Bitcoin")
+            );
+            assert_eq!(
+                protos::bitcoin::GetPublicKey::decode(calls[1].1.as_slice())
+                    .unwrap()
+                    .coin_name
+                    .as_deref(),
+                Some("Bitcoin")
+            );
+            assert_eq!(
+                protos::bitcoin::SignMessage::decode(calls[2].1.as_slice())
+                    .unwrap()
+                    .coin_name
+                    .as_deref(),
+                Some("Bitcoin")
+            );
+            assert_eq!(mock.remaining(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_message_requires_coin_before_signature_decoding() {
+        let (device, mock) = mock_device(vec![]);
+        for signature in ["", "AQ==", "not-base64"] {
+            let err = device
+                .verify_message(VerifyMessageParams {
+                    signature: signature.into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, crate::error::TrezorError::Device(DeviceError::InvalidParameter(ref message)) if message == "coin is required")
+            );
+        }
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_message_sends_explicit_coin() {
+        let (device, mock) = mock_device(vec![ScriptedExchange {
+            expect_type: MessageType::VerifyMessage as u16,
+            reply_type: MessageType::Success as u16,
+            reply: protos::common::Success { message: None }.encode_to_vec(),
+        }]);
+        assert!(
+            device
+                .verify_message(VerifyMessageParams {
+                    coin: Some(Network::Testnet),
+                    signature: "AQ==".into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        );
+        let request = protos::bitcoin::VerifyMessage::decode(mock.calls()[0].1.as_slice()).unwrap();
+        assert_eq!(request.coin_name.as_deref(), Some("Testnet"));
+    }
+
+    #[tokio::test]
+    async fn sign_infers_testnet_for_external_output() {
+        let mut params = base_params();
+        params.inputs[0].path = "m/86'/1'/0'/0/0".into();
+        params.outputs[0].address = Some("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into());
+        let (device, mock) = mock_device(simple_flow_script(&params));
+
+        let signed = device.sign_transaction(params).await.unwrap();
+        assert!(signed.txid.is_some());
+        let request = protos::bitcoin::SignTx::decode(mock.calls()[0].1.as_slice()).unwrap();
+        assert_eq!(request.coin_name.as_deref(), Some("Testnet"));
+        assert_eq!(mock.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn sign_inferred_testnet_rejects_mainnet_output() {
+        let mut params = base_params();
+        params.inputs[0].path = "m/86'/1'/0'/0/0".into();
+        let (device, mock) = mock_device(vec![]);
+
+        let err = device.sign_transaction(params).await.unwrap_err();
+        assert!(err.to_string().contains("Network mismatch"), "{err}");
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_uses_same_network_for_change_and_signing() {
+        for coin in [None, Some(Network::Regtest)] {
+            let mut params = base_params();
+            params.coin = coin;
+            params.inputs[0].path = "m/86'/1'/0'/0/0".into();
+            params.outputs[0].address = None;
+            params.outputs[0].path = Some("m/84'/1'/0'/1/0".into());
+            let mut script = vec![ScriptedExchange {
+                expect_type: MessageType::GetPublicKey as u16,
+                reply_type: MessageType::PublicKey as u16,
+                reply: public_key_reply(),
+            }];
+            script.extend(simple_flow_script(&params));
+            let (device, mock) = mock_device(script);
+
+            device.sign_transaction(params).await.unwrap();
+            let calls = mock.calls();
+            let key = protos::bitcoin::GetPublicKey::decode(calls[0].1.as_slice()).unwrap();
+            let sign = protos::bitcoin::SignTx::decode(calls[1].1.as_slice()).unwrap();
+            let expected = coin.unwrap_or(Network::Testnet).coin_name();
+            assert_eq!(key.coin_name.as_deref(), Some(expected));
+            assert_eq!(sign.coin_name.as_deref(), Some(expected));
+            assert_eq!(mock.remaining(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn sign_rejects_total_below_dust_limit() {
         let (device, mock) = mock_device(vec![]);
         let mut params = base_params();
@@ -2064,6 +2463,7 @@ mod tests {
     async fn sign_rejects_external_input_without_script_pubkey() {
         let (device, mock) = mock_device(vec![]);
         let mut params = base_params();
+        params.coin = Some(Network::Bitcoin);
         params.inputs[0].script_type = ScriptType::External;
         params.inputs[0].path = String::new();
 

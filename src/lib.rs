@@ -125,6 +125,9 @@ pub(crate) mod bitcoin_utils;
 // Post-sign verification of device-returned transactions (crate-internal)
 pub(crate) mod tx_verify;
 
+// Connect 10 public-key field split (crate-internal)
+pub(crate) mod xpub_form;
+
 // Re-export error types
 pub use error::{Result, TrezorError};
 

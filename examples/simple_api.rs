@@ -211,6 +211,7 @@ async fn main() -> trezor_connect_rs::Result<()> {
             address: signature.address.clone(),
             signature: signature.signature.clone(),
             message: message.into(),
+            coin: Some(trezor_connect_rs::Network::Bitcoin),
             ..Default::default()
         })
         .await?;

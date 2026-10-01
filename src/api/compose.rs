@@ -105,7 +105,7 @@ pub enum PrecomposeOutput {
 pub struct PrecomposeParams {
     /// Desired outputs
     pub outputs: Vec<PrecomposeOutput>,
-    /// Coin name (e.g., "Bitcoin")
+    /// Coin shortcut (`btc`, `test`, `regtest`). Names such as `Bitcoin` are rejected.
     pub coin: String,
     /// Account with UTXOs and addresses
     pub account: ComposeAccount,
@@ -282,6 +282,16 @@ fn infer_change_script_type(account_path: &str) -> ScriptType {
 ///
 /// Returns one `PrecomposedResult` per fee level.
 pub fn precompose(params: PrecomposeParams) -> Vec<PrecomposedResult> {
+    if crate::types::network::Network::from_shortcut(&params.coin).is_none() {
+        return params
+            .fee_levels
+            .iter()
+            .map(|_| PrecomposedResult::Error {
+                error: "Method_UnknownCoin".into(),
+            })
+            .collect();
+    }
+
     let change_script_type = infer_change_script_type(&params.account.path);
     let sorting = params.sorting_strategy.unwrap_or_default();
 
@@ -579,6 +589,24 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn precompose_rejects_coin_names() {
+        let params = PrecomposeParams {
+            outputs: vec![],
+            coin: "Bitcoin".into(),
+            account: test_account(),
+            fee_levels: vec![FeeLevel {
+                fee_per_unit: "2".into(),
+                base_fee: None,
+                floor_base_fee: None,
+            }],
+            sequence: None,
+            sorting_strategy: None,
+        };
+        assert!(matches!(precompose(params).as_slice(),
+            [PrecomposedResult::Error { error }] if error == "Method_UnknownCoin"));
+    }
+
     /// Test that precompose produces a valid Final result using real regtest account data.
     /// No device needed — pure offline composition.
     #[test]
@@ -591,7 +619,7 @@ mod tests {
                     amount: "50000".to_string(),
                 },
             ],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![FeeLevel {
                 fee_per_unit: "2".to_string(),
@@ -655,7 +683,7 @@ mod tests {
                 address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
                 amount: "50000".to_string(),
             }],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![FeeLevel {
                 fee_per_unit: "2".to_string(),
@@ -744,7 +772,7 @@ mod tests {
             outputs: vec![PrecomposeOutput::SendMax {
                 address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
             }],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![FeeLevel {
                 fee_per_unit: "2".to_string(),
@@ -801,7 +829,7 @@ mod tests {
                 address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
                 amount: "50000".to_string(),
             }],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![
                 FeeLevel {
@@ -884,7 +912,7 @@ mod tests {
                     amount: "50000".to_string(),
                 },
             ],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![FeeLevel {
                 fee_per_unit: "2".to_string(),
@@ -1015,7 +1043,7 @@ mod tests {
                 address: "bcrt1qeyn4amkfpuz589f6x7adzclqx98akv6mvzvndp".to_string(),
                 amount: "50000".to_string(),
             }],
-            coin: "Regtest".to_string(),
+            coin: "regtest".to_string(),
             account: test_account(),
             fee_levels: vec![FeeLevel {
                 fee_per_unit: "2".to_string(),
