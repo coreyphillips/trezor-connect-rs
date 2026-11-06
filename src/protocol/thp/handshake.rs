@@ -5,7 +5,15 @@
 
 use super::crypto::*;
 use super::state::{ThpHandshakeCredentials, ThpPairingMethod, ThpState};
+use crate::constants::thp_control;
 use crate::error::{Result, ThpError};
+
+/// `trezor_state` values in a handshake completion response.
+const STATE_UNPAIRED: u8 = 0;
+const STATE_PAIRED: u8 = 1;
+const STATE_PAIRED_AUTOCONNECT: u8 = 2;
+
+const CRC_LENGTH: usize = 4;
 
 /// Handshake init request data
 #[derive(Debug, Clone)]
@@ -34,6 +42,18 @@ pub struct HandshakeCompletionRequest {
     pub encrypted_host_static_pubkey: Vec<u8>,
     /// Encrypted payload
     pub encrypted_payload: Vec<u8>,
+}
+
+impl HandshakeCompletionRequest {
+    /// Whether this request carries a stored credential.
+    ///
+    /// [`handle_handshake_init`] only includes a credential after it matched the
+    /// device's masked static key, so a `true` here means this handshake
+    /// authenticated the peer. Without a credential the payload is empty and
+    /// encrypts to a bare authentication tag.
+    pub(crate) fn includes_credential(&self) -> bool {
+        self.encrypted_payload.len() > AES_GCM_TAG_SIZE
+    }
 }
 
 /// Handshake completion response (from device)
@@ -83,6 +103,11 @@ pub fn verify_stored_credential(
     let trezor_static = x25519_dalek::PublicKey::from(credential.trezor_static_public_key);
     let h_secret = x25519_dalek::StaticSecret::from(h);
     let expected = h_secret.diffie_hellman(&trezor_static);
+
+    // A low-order stored key would match a masked key that proves nothing.
+    if !expected.was_contributory() {
+        return false;
+    }
 
     // Compare with the masked pubkey from device
     expected.as_bytes() == trezor_masked_static_pubkey
@@ -266,6 +291,73 @@ pub fn handle_handshake_init(
     })
 }
 
+/// What the host must do after a handshake completion response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionOutcome {
+    /// No credential was sent and the device is unpaired: run code-entry pairing.
+    PairingRequired,
+    /// The device did not accept the credential that was sent.
+    CredentialRejected,
+    /// The device accepted the verified credential that was sent.
+    CredentialAccepted,
+}
+
+/// Decide what a completion response means for this handshake.
+///
+/// `trezor_state` is a byte chosen by the peer under keys it negotiated itself,
+/// so it proves nothing on its own. Only a credential verified against a stored
+/// device key authenticates the peer, which is why a paired state without one is
+/// an error (THP spec, host state HH3, step 3) and not a reason to skip pairing.
+pub(crate) fn completion_outcome(
+    trezor_state: u8,
+    credential_sent: bool,
+) -> Result<CompletionOutcome> {
+    match (trezor_state, credential_sent) {
+        (STATE_UNPAIRED, false) => Ok(CompletionOutcome::PairingRequired),
+        (STATE_UNPAIRED, true) => Ok(CompletionOutcome::CredentialRejected),
+        (STATE_PAIRED | STATE_PAIRED_AUTOCONNECT, true) => {
+            Ok(CompletionOutcome::CredentialAccepted)
+        }
+        (STATE_PAIRED | STATE_PAIRED_AUTOCONNECT, false) => Err(ThpError::HandshakeFailed(
+            "device reported a paired state without a verified credential".to_string(),
+        )
+        .into()),
+        (state, _) => {
+            Err(ThpError::HandshakeFailed(format!("device reported invalid state {state}")).into())
+        }
+    }
+}
+
+/// Extract the encrypted payload from a handshake completion response frame.
+///
+/// Anything else is an error, so that a malformed or unexpected frame can never
+/// skip the pairing decision.
+pub(crate) fn completion_response_payload(frame: &[u8]) -> Result<&[u8]> {
+    let unexpected = |reason: String| {
+        ThpError::HandshakeFailed(format!(
+            "Unexpected response to handshake completion: {reason}"
+        ))
+    };
+
+    // Header: control(1) + channel(2) + length(2).
+    let (&[control, _, _, length_high, length_low], rest) = frame
+        .split_first_chunk::<5>()
+        .ok_or_else(|| unexpected(format!("{} byte frame", frame.len())))?;
+    if super::decode_control_byte(control) != Some(thp_control::HANDSHAKE_COMP_RES) {
+        return Err(unexpected(format!("control byte {control:#04x}")).into());
+    }
+
+    let length = u16::from_be_bytes([length_high, length_low]) as usize;
+    if length <= CRC_LENGTH || rest.len() < length {
+        return Err(unexpected(format!(
+            "payload length {length} in a {} byte frame",
+            frame.len()
+        ))
+        .into());
+    }
+    Ok(&rest[..length - CRC_LENGTH])
+}
+
 /// Parse handshake completion response
 pub fn parse_handshake_completion_response(
     state: &ThpState,
@@ -329,6 +421,125 @@ mod tests {
         let iv = get_iv_from_nonce(0);
         let encrypted = aes_gcm_encrypt(&key, &iv, &[], plaintext).unwrap();
         (state, encrypted)
+    }
+
+    #[test]
+    fn completion_outcome_requires_a_credential_for_a_paired_state() {
+        use CompletionOutcome::*;
+
+        for (state, credential_sent, expected) in [
+            (0, false, Some(PairingRequired)),
+            (0, true, Some(CredentialRejected)),
+            (1, true, Some(CredentialAccepted)),
+            (2, true, Some(CredentialAccepted)),
+            (1, false, None),
+            (2, false, None),
+            (3, false, None),
+            (3, true, None),
+            (255, true, None),
+        ] {
+            let outcome = completion_outcome(state, credential_sent).ok();
+            assert_eq!(
+                outcome, expected,
+                "state={state} credential={credential_sent}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_response_payload_accepts_a_well_formed_frame() {
+        let mut frame = vec![thp_control::HANDSHAKE_COMP_RES, 0x12, 0x34, 0x00, 0x07];
+        frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0, 0, 0, 0]);
+        assert_eq!(
+            completion_response_payload(&frame).unwrap(),
+            &[0xaa, 0xbb, 0xcc]
+        );
+
+        // The sync and ack bits are not part of the control type.
+        frame[0] |= 0x18;
+        assert!(completion_response_payload(&frame).is_ok());
+
+        // Zero padding after the declared length is not part of the payload.
+        frame.resize(64, 0);
+        assert_eq!(
+            completion_response_payload(&frame).unwrap(),
+            &[0xaa, 0xbb, 0xcc]
+        );
+    }
+
+    #[test]
+    fn completion_response_payload_rejects_malformed_frames() {
+        let comp = thp_control::HANDSHAKE_COMP_RES;
+        for frame in [
+            vec![],
+            vec![comp, 0x12, 0x34],
+            vec![comp, 0x12, 0x34, 0x00],
+            // Declares less than a CRC.
+            vec![comp, 0x12, 0x34, 0x00, 0x00],
+            vec![comp, 0x12, 0x34, 0x00, 0x03, 0, 0, 0],
+            // Only a CRC.
+            vec![comp, 0x12, 0x34, 0x00, 0x04, 0, 0, 0, 0],
+            // Declares more than it holds.
+            vec![comp, 0x12, 0x34, 0x00, 0xff, 0, 0, 0, 0, 0],
+            // Some other message.
+            vec![
+                thp_control::ENCRYPTED,
+                0x12,
+                0x34,
+                0x00,
+                0x05,
+                1,
+                0,
+                0,
+                0,
+                0,
+            ],
+        ] {
+            let error = completion_response_payload(&frame).unwrap_err();
+            assert!(error.to_string().contains("Unexpected response"), "{error}");
+        }
+    }
+
+    #[test]
+    fn empty_payload_is_not_a_credential_but_any_credential_is() {
+        let request_with_payload_of = |length: usize| HandshakeCompletionRequest {
+            encrypted_host_static_pubkey: vec![0; 48],
+            encrypted_payload: vec![0; length],
+        };
+        assert!(!request_with_payload_of(AES_GCM_TAG_SIZE).includes_credential());
+        assert!(request_with_payload_of(AES_GCM_TAG_SIZE + 2).includes_credential());
+    }
+
+    #[test]
+    fn low_order_stored_key_does_not_verify() {
+        let credential = StoredCredential {
+            trezor_static_public_key: [0u8; 32],
+            ..Default::default()
+        };
+        assert!(!verify_stored_credential(
+            &credential,
+            &[0u8; 32],
+            &[0x22; 32]
+        ));
+    }
+
+    #[test]
+    fn stored_key_verifies_against_its_masked_key() {
+        let (_, trezor_static) = keypair_from_secret(&[0x11; 32]);
+        let (_, trezor_ephemeral) = keypair_from_secret(&[0x22; 32]);
+        let credential = StoredCredential {
+            trezor_static_public_key: trezor_static.to_bytes(),
+            ..Default::default()
+        };
+
+        let h = hash_of_two(trezor_static.as_bytes(), trezor_ephemeral.as_bytes());
+        let masked = x25519_dalek::StaticSecret::from(h).diffie_hellman(&trezor_static);
+
+        assert!(verify_stored_credential(
+            &credential,
+            masked.as_bytes(),
+            trezor_ephemeral.as_bytes()
+        ));
     }
 
     #[test]

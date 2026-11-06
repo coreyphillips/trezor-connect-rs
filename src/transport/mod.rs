@@ -10,6 +10,9 @@ pub mod traits;
 #[cfg(test)]
 pub(crate) mod mock;
 
+#[cfg(test)]
+mod thp_handshake_tests;
+
 #[cfg(feature = "usb")]
 pub mod usb;
 

@@ -19,7 +19,8 @@ use crate::constants::{
 };
 use crate::error::{Result, ThpError, TransportError};
 use crate::protocol::thp::{
-    HandshakeInitResponse, ProtocolThp, encode_ack, encode_channel_allocation_request,
+    CompletionOutcome, HandshakeInitResponse, ProtocolThp, completion_outcome,
+    completion_response_payload, encode_ack, encode_channel_allocation_request,
     encode_encrypted_message, encode_handshake_completion_request, encode_handshake_init_request,
     get_handshake_hash, handle_handshake_init, pairing_messages::encode_create_new_session,
     parse_handshake_completion_response, state::ThpHandshakeCredentials,
@@ -739,75 +740,72 @@ impl UsbTransport {
         let ack = encode_ack(&channel, ack_bit);
         self.write_raw_thp(path, &ack).await?;
 
-        let ctrl = comp_resp[0] & 0xe7;
-        if ctrl == thp_control::HANDSHAKE_COMP_RES {
-            let payload_len = u16::from_be_bytes([comp_resp[3], comp_resp[4]]) as usize;
-            let crc_len = 4;
+        let encrypted_payload = completion_response_payload(&comp_resp)?;
 
-            if comp_resp.len() >= 5 + payload_len && payload_len > crc_len {
-                let encrypted_payload = &comp_resp[5..5 + payload_len - crc_len];
+        let completion = {
+            let states = self.thp_states.read().await;
+            let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
+            parse_handshake_completion_response(state.protocol.state(), encrypted_payload)?
+        };
 
-                let completion = {
-                    let states = self.thp_states.read().await;
-                    let state = states.get(path).ok_or(TransportError::DeviceNotFound)?;
-                    parse_handshake_completion_response(state.protocol.state(), encrypted_payload)?
-                };
+        log::info!(
+            "[USB-THP] trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
+            completion.trezor_state
+        );
 
-                log::info!(
-                    "[USB-THP] trezor_state={} (0=needs pairing, 1=paired, 2=autoconnect)",
-                    completion.trezor_state
-                );
+        match completion_outcome(
+            completion.trezor_state,
+            completion_req.includes_credential(),
+        )? {
+            CompletionOutcome::PairingRequired | CompletionOutcome::CredentialRejected => {
+                // Device requires pairing
+                log::info!("[USB-THP] Device requires pairing");
+                self.perform_thp_pairing(path, &channel).await?;
+            }
+            CompletionOutcome::CredentialAccepted => {
+                // Device accepted (state=1 or 2) — send ThpEndRequest
+                log::info!("[USB-THP] Device accepted, finalizing connection...");
 
-                if completion.trezor_state == 0 {
-                    // Device requires pairing
-                    log::info!("[USB-THP] Device requires pairing");
-                    self.perform_thp_pairing(path, &channel).await?;
-                } else {
-                    // Device accepted (state=1 or 2) — send ThpEndRequest
-                    log::info!("[USB-THP] Device accepted, finalizing connection...");
-
-                    // Mark as paired to enable encrypted messaging
-                    {
-                        let mut states = self.thp_states.write().await;
-                        if let Some(state) = states.get_mut(path) {
-                            state.protocol.state_mut().set_is_paired(true);
-                        }
+                // Mark as paired to enable encrypted messaging
+                {
+                    let mut states = self.thp_states.write().await;
+                    if let Some(state) = states.get_mut(path) {
+                        state.protocol.state_mut().set_is_paired(true);
                     }
+                }
 
-                    let (end_resp_type, _) = self
+                let (end_resp_type, _) = self
+                    .send_thp_encrypted(
+                        path,
+                        &channel,
+                        crate::constants::thp_message_type::THP_END_REQUEST,
+                        &[],
+                    )
+                    .await?;
+
+                if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
+                    log::info!("[USB-THP] Device requesting connection confirmation...");
+                    let (ack_resp_type, _) = self
                         .send_thp_encrypted(
                             path,
                             &channel,
-                            crate::constants::thp_message_type::THP_END_REQUEST,
+                            crate::constants::message_type::BUTTON_ACK,
                             &[],
                         )
                         .await?;
-
-                    if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
-                        log::info!("[USB-THP] Device requesting connection confirmation...");
-                        let (ack_resp_type, _) = self
-                            .send_thp_encrypted(
-                                path,
-                                &channel,
-                                crate::constants::message_type::BUTTON_ACK,
-                                &[],
-                            )
-                            .await?;
-                        if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
-                            return Err(ThpError::HandshakeFailed(format!(
-                                "Expected ThpEndResponse after ButtonAck, got: {}",
-                                ack_resp_type
-                            ))
-                            .into());
-                        }
-                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE
-                    {
+                    if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
                         return Err(ThpError::HandshakeFailed(format!(
-                            "Expected ThpEndResponse, got: {}",
-                            end_resp_type
+                            "Expected ThpEndResponse after ButtonAck, got: {}",
+                            ack_resp_type
                         ))
                         .into());
                     }
+                } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
+                    return Err(ThpError::HandshakeFailed(format!(
+                        "Expected ThpEndResponse, got: {}",
+                        end_resp_type
+                    ))
+                    .into());
                 }
             }
         }
