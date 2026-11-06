@@ -498,6 +498,11 @@ async fn credential_the_device_rejects_falls_back_to_fresh_pairing() {
 
     assert_eq!(peer.observed(|o| o.code_prompts), 1);
     peer.assert_received_passphrase_once();
+    assert_eq!(peer.observed(|o| o.channel_allocations), 2);
+    assert_eq!(
+        peer.observed(|o| o.credentials_received.clone()),
+        vec![b"revoked-credential".to_vec()]
+    );
 }
 
 // An unverified peer must not reach session creation.
@@ -550,11 +555,15 @@ async fn unknown_state_is_rejected_even_with_a_verified_credential() {
 }
 
 #[tokio::test]
-async fn unexpected_completion_control_byte_is_rejected() {
+async fn malformed_completion_is_retried_then_clears_the_stored_credential() {
     let peer = SimulatedPeer::new(CompletionReply::WrongControlByte);
+    peer.store_credential_this_device_issued();
 
     acquire(&peer).await.unwrap_err();
 
+    assert_eq!(peer.observed(|o| o.channel_allocations), 4);
+    assert_eq!(peer.observed(|o| o.credentials_received.len()), 3);
+    assert_eq!(peer.observed(|o| o.credential_saves), 1);
     peer.assert_received_no_session_request();
 }
 

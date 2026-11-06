@@ -104,6 +104,11 @@ pub fn verify_stored_credential(
     let h_secret = x25519_dalek::StaticSecret::from(h);
     let expected = h_secret.diffie_hellman(&trezor_static);
 
+    // A low-order stored key would match a masked key that proves nothing.
+    if !expected.was_contributory() {
+        return false;
+    }
+
     // Compare with the masked pubkey from device
     expected.as_bytes() == trezor_masked_static_pubkey
 }
@@ -453,6 +458,13 @@ mod tests {
         // The sync and ack bits are not part of the control type.
         frame[0] |= 0x18;
         assert!(completion_response_payload(&frame).is_ok());
+
+        // Zero padding after the declared length is not part of the payload.
+        frame.resize(64, 0);
+        assert_eq!(
+            completion_response_payload(&frame).unwrap(),
+            &[0xaa, 0xbb, 0xcc]
+        );
     }
 
     #[test]
@@ -493,6 +505,38 @@ mod tests {
         };
         assert!(!request_with_payload_of(AES_GCM_TAG_SIZE).includes_credential());
         assert!(request_with_payload_of(AES_GCM_TAG_SIZE + 2).includes_credential());
+    }
+
+    #[test]
+    fn low_order_stored_key_does_not_verify() {
+        let credential = StoredCredential {
+            trezor_static_public_key: [0u8; 32],
+            ..Default::default()
+        };
+        assert!(!verify_stored_credential(
+            &credential,
+            &[0u8; 32],
+            &[0x22; 32]
+        ));
+    }
+
+    #[test]
+    fn stored_key_verifies_against_its_masked_key() {
+        let (_, trezor_static) = keypair_from_secret(&[0x11; 32]);
+        let (_, trezor_ephemeral) = keypair_from_secret(&[0x22; 32]);
+        let credential = StoredCredential {
+            trezor_static_public_key: trezor_static.to_bytes(),
+            ..Default::default()
+        };
+
+        let h = hash_of_two(trezor_static.as_bytes(), trezor_ephemeral.as_bytes());
+        let masked = x25519_dalek::StaticSecret::from(h).diffie_hellman(&trezor_static);
+
+        assert!(verify_stored_credential(
+            &credential,
+            masked.as_bytes(),
+            trezor_ephemeral.as_bytes()
+        ));
     }
 
     #[test]
