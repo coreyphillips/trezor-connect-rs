@@ -565,6 +565,7 @@ async fn malformed_completion_is_retried_then_clears_the_stored_credential() {
     assert_eq!(peer.observed(|o| o.credentials_received.len()), 3);
     assert_eq!(peer.observed(|o| o.credential_saves), 1);
     peer.assert_received_no_session_request();
+    assert!(peer.load_thp_credential(PATH).is_none());
 }
 
 #[tokio::test]
