@@ -605,8 +605,6 @@ impl BluetoothTransport {
         let ack = encode_ack(&channel, ack_bit);
         self.write_raw(path, &ack).await?;
 
-        // Only a well-formed completion response can move this channel towards a
-        // paired state. The peer's reported state then decides nothing by itself.
         let encrypted_payload = completion_response_payload(&comp_resp)?;
         log::debug!(
             "[BLE] Encrypted completion payload: {} bytes",

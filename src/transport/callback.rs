@@ -1222,8 +1222,6 @@ impl CallbackTransport {
         let ack = encode_ack(&channel, ack_bit);
         self.write_raw(path, &ack)?;
 
-        // Only a well-formed completion response can move this channel towards a
-        // paired state. The peer's reported state then decides nothing by itself.
         let encrypted_payload = completion_response_payload(&comp_resp)?;
         let completion = {
             let states = self.ble_states.read().await;

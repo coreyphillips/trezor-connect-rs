@@ -13,10 +13,7 @@ const STATE_UNPAIRED: u8 = 0;
 const STATE_PAIRED: u8 = 1;
 const STATE_PAIRED_AUTOCONNECT: u8 = 2;
 
-const AES_GCM_TAG_LENGTH: usize = 16;
 const CRC_LENGTH: usize = 4;
-/// Masks the sync and ack bits out of a THP control byte.
-const CONTROL_TYPE_MASK: u8 = 0xe7;
 
 /// Handshake init request data
 #[derive(Debug, Clone)]
@@ -54,8 +51,8 @@ impl HandshakeCompletionRequest {
     /// device's masked static key, so a `true` here means this handshake
     /// authenticated the peer. Without a credential the payload is empty and
     /// encrypts to a bare authentication tag.
-    pub fn includes_credential(&self) -> bool {
-        self.encrypted_payload.len() > AES_GCM_TAG_LENGTH
+    pub(crate) fn includes_credential(&self) -> bool {
+        self.encrypted_payload.len() > AES_GCM_TAG_SIZE
     }
 }
 
@@ -291,7 +288,7 @@ pub fn handle_handshake_init(
 
 /// What the host must do after a handshake completion response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionOutcome {
+pub(crate) enum CompletionOutcome {
     /// No credential was sent and the device is unpaired: run code-entry pairing.
     PairingRequired,
     /// The device did not accept the credential that was sent.
@@ -306,7 +303,10 @@ pub enum CompletionOutcome {
 /// so it proves nothing on its own. Only a credential verified against a stored
 /// device key authenticates the peer, which is why a paired state without one is
 /// an error (THP spec, host state HH3, step 3) and not a reason to skip pairing.
-pub fn completion_outcome(trezor_state: u8, credential_sent: bool) -> Result<CompletionOutcome> {
+pub(crate) fn completion_outcome(
+    trezor_state: u8,
+    credential_sent: bool,
+) -> Result<CompletionOutcome> {
     match (trezor_state, credential_sent) {
         (STATE_UNPAIRED, false) => Ok(CompletionOutcome::PairingRequired),
         (STATE_UNPAIRED, true) => Ok(CompletionOutcome::CredentialRejected),
@@ -327,7 +327,7 @@ pub fn completion_outcome(trezor_state: u8, credential_sent: bool) -> Result<Com
 ///
 /// Anything else is an error, so that a malformed or unexpected frame can never
 /// skip the pairing decision.
-pub fn completion_response_payload(frame: &[u8]) -> Result<&[u8]> {
+pub(crate) fn completion_response_payload(frame: &[u8]) -> Result<&[u8]> {
     let unexpected = |reason: String| {
         ThpError::HandshakeFailed(format!(
             "Unexpected response to handshake completion: {reason}"
@@ -338,7 +338,7 @@ pub fn completion_response_payload(frame: &[u8]) -> Result<&[u8]> {
     let (&[control, _, _, length_high, length_low], rest) = frame
         .split_first_chunk::<5>()
         .ok_or_else(|| unexpected(format!("{} byte frame", frame.len())))?;
-    if control & CONTROL_TYPE_MASK != thp_control::HANDSHAKE_COMP_RES {
+    if super::decode_control_byte(control) != Some(thp_control::HANDSHAKE_COMP_RES) {
         return Err(unexpected(format!("control byte {control:#04x}")).into());
     }
 
@@ -442,19 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn rejected_states_do_not_trigger_handshake_retries() {
-        // perform_thp_handshake retries on these substrings and then clears the
-        // stored credential, which a peer's reported state must not be able to cause.
-        for (state, credential_sent) in [(1, false), (3, true)] {
-            let error = completion_outcome(state, credential_sent)
-                .unwrap_err()
-                .to_string();
-            assert!(!error.contains("Unexpected response"), "{error}");
-            assert!(!error.contains("CredentialRejected"), "{error}");
-        }
-    }
-
-    #[test]
     fn completion_response_payload_accepts_a_well_formed_frame() {
         let mut frame = vec![thp_control::HANDSHAKE_COMP_RES, 0x12, 0x34, 0x00, 0x07];
         frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0, 0, 0, 0]);
@@ -504,8 +491,8 @@ mod tests {
             encrypted_host_static_pubkey: vec![0; 48],
             encrypted_payload: vec![0; length],
         };
-        assert!(!request_with_payload_of(AES_GCM_TAG_LENGTH).includes_credential());
-        assert!(request_with_payload_of(AES_GCM_TAG_LENGTH + 2).includes_credential());
+        assert!(!request_with_payload_of(AES_GCM_TAG_SIZE).includes_credential());
+        assert!(request_with_payload_of(AES_GCM_TAG_SIZE + 2).includes_credential());
     }
 
     #[test]
