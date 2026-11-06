@@ -16,7 +16,8 @@ use crate::constants::{
 };
 use crate::error::{Result, ThpError, TransportError};
 use crate::protocol::thp::{
-    HandshakeInitResponse, ProtocolThp, encode_ack, encode_channel_allocation_request,
+    CompletionOutcome, HandshakeInitResponse, ProtocolThp, completion_outcome,
+    completion_response_payload, encode_ack, encode_channel_allocation_request,
     encode_encrypted_message, encode_handshake_completion_request, encode_handshake_init_request,
     get_handshake_hash, handle_handshake_init, pairing_messages::encode_create_new_session,
     parse_handshake_completion_response, state::ThpHandshakeCredentials,
@@ -604,118 +605,106 @@ impl BluetoothTransport {
         let ack = encode_ack(&channel, ack_bit);
         self.write_raw(path, &ack).await?;
 
-        // Check if pairing is required
-        let ctrl = comp_resp[0] & 0xe7;
-        if ctrl == thp_control::HANDSHAKE_COMP_RES {
-            // Extract encrypted payload from response
-            // Header: control(1) + channel(2) + length(2) = 5 bytes
-            // Payload: length bytes (includes encrypted content + CRC)
-            let payload_len = u16::from_be_bytes([comp_resp[3], comp_resp[4]]) as usize;
-            let crc_len = 4;
+        // Only a well-formed completion response can move this channel towards a
+        // paired state. The peer's reported state then decides nothing by itself.
+        let encrypted_payload = completion_response_payload(&comp_resp)?;
+        log::debug!(
+            "[BLE] Encrypted completion payload: {} bytes",
+            encrypted_payload.len()
+        );
 
-            if comp_resp.len() >= 5 + payload_len && payload_len > crc_len {
-                let encrypted_payload = &comp_resp[5..5 + payload_len - crc_len];
-                log::debug!(
-                    "[BLE] Encrypted completion payload: {} bytes",
-                    encrypted_payload.len()
-                );
+        // Decrypt and parse the completion response
+        let completion = {
+            let devices = self.devices.read().await;
+            let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
+            parse_handshake_completion_response(device.protocol.state(), encrypted_payload)?
+        };
 
-                // Decrypt and parse the completion response
-                let completion = {
-                    let devices = self.devices.read().await;
-                    let device = devices.get(path).ok_or(TransportError::DeviceNotFound)?;
-                    parse_handshake_completion_response(device.protocol.state(), encrypted_payload)?
+        log::info!(
+            "[BLE] Trezor state: {} (0=needs pairing, 1=paired)",
+            completion.trezor_state
+        );
+        log::info!(
+            "[BLE] Available pairing methods: {:?}",
+            completion.pairing_methods
+        );
+
+        match completion_outcome(
+            completion.trezor_state,
+            completion_req.includes_credential(),
+        )? {
+            CompletionOutcome::PairingRequired | CompletionOutcome::CredentialRejected => {
+                log::info!("[BLE] Device requires pairing - starting pairing flow");
+
+                // Use the callback if set, otherwise use stdin
+                let callback = self.pairing_callback.clone();
+                let code_fn = move || -> String {
+                    if let Some(ref cb) = callback {
+                        cb()
+                    } else {
+                        // Default to stdin for code entry
+                        use std::io::{self, Write};
+                        print!("Enter 6-digit code from Trezor: ");
+                        io::stdout().flush().unwrap();
+                        let mut code = String::new();
+                        io::stdin().read_line(&mut code).unwrap();
+                        code.trim().to_string()
+                    }
                 };
 
-                log::info!(
-                    "[BLE] Trezor state: {} (0=needs pairing, 1=paired)",
-                    completion.trezor_state
-                );
-                log::info!(
-                    "[BLE] Available pairing methods: {:?}",
-                    completion.pairing_methods
-                );
+                // Perform pairing
+                self.perform_pairing(path, code_fn).await?;
 
-                if completion.trezor_state == 0 {
-                    log::info!("[BLE] Device requires pairing - starting pairing flow");
+                log::info!("[BLE] Pairing completed successfully");
+            }
+            CompletionOutcome::CredentialAccepted => {
+                // Reconnecting with stored credentials - still need to send ThpEndRequest
+                // to finalize the handshake before creating a session
+                log::info!("[BLE] Reconnecting with stored credentials - sending ThpEndRequest...");
 
-                    // Use the callback if set, otherwise use stdin
-                    let callback = self.pairing_callback.clone();
-                    let code_fn = move || -> String {
-                        if let Some(ref cb) = callback {
-                            cb()
-                        } else {
-                            // Default to stdin for code entry
-                            use std::io::{self, Write};
-                            print!("Enter 6-digit code from Trezor: ");
-                            io::stdout().flush().unwrap();
-                            let mut code = String::new();
-                            io::stdin().read_line(&mut code).unwrap();
-                            code.trim().to_string()
-                        }
-                    };
+                // Mark as paired first so we can use encrypted messaging
+                {
+                    let mut devices = self.devices.write().await;
+                    let device = devices
+                        .get_mut(path)
+                        .ok_or(TransportError::DeviceNotFound)?;
+                    device.protocol.state_mut().set_is_paired(true);
+                }
 
-                    // Perform pairing
-                    self.perform_pairing(path, code_fn).await?;
+                let (end_resp_type, _) = self
+                    .send_encrypted_message(
+                        path,
+                        crate::constants::thp_message_type::THP_END_REQUEST,
+                        &[],
+                    )
+                    .await?;
 
-                    log::info!("[BLE] Pairing completed successfully");
-                } else {
-                    // Reconnecting with stored credentials - still need to send ThpEndRequest
-                    // to finalize the handshake before creating a session
-                    log::info!(
-                        "[BLE] Reconnecting with stored credentials - sending ThpEndRequest..."
-                    );
-
-                    // Mark as paired first so we can use encrypted messaging
-                    {
-                        let mut devices = self.devices.write().await;
-                        let device = devices
-                            .get_mut(path)
-                            .ok_or(TransportError::DeviceNotFound)?;
-                        device.protocol.state_mut().set_is_paired(true);
-                    }
-
-                    let (end_resp_type, _) = self
+                // state=1 may trigger a ButtonRequest for connection confirmation on the device
+                if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
+                    log::info!("[BLE] Device requesting connection confirmation...");
+                    let (ack_resp_type, _) = self
                         .send_encrypted_message(
                             path,
-                            crate::constants::thp_message_type::THP_END_REQUEST,
+                            crate::constants::message_type::BUTTON_ACK,
                             &[],
                         )
                         .await?;
-
-                    // state=1 may trigger a ButtonRequest for connection confirmation on the device
-                    if end_resp_type == crate::constants::message_type::BUTTON_REQUEST {
-                        log::info!("[BLE] Device requesting connection confirmation...");
-                        let (ack_resp_type, _) = self
-                            .send_encrypted_message(
-                                path,
-                                crate::constants::message_type::BUTTON_ACK,
-                                &[],
-                            )
-                            .await?;
-                        if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
-                            return Err(ThpError::PairingFailed(format!(
-                                "Expected ThpEndResponse after ButtonACK, got {}",
-                                ack_resp_type
-                            ))
-                            .into());
-                        }
-                    } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE
-                    {
+                    if ack_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
                         return Err(ThpError::PairingFailed(format!(
-                            "Expected ThpEndResponse ({}), got {}",
-                            crate::constants::thp_message_type::THP_END_RESPONSE,
-                            end_resp_type
+                            "Expected ThpEndResponse after ButtonACK, got {}",
+                            ack_resp_type
                         ))
                         .into());
                     }
-                    log::info!("[BLE] ThpEndRequest completed for reconnection");
+                } else if end_resp_type != crate::constants::thp_message_type::THP_END_RESPONSE {
+                    return Err(ThpError::PairingFailed(format!(
+                        "Expected ThpEndResponse ({}), got {}",
+                        crate::constants::thp_message_type::THP_END_RESPONSE,
+                        end_resp_type
+                    ))
+                    .into());
                 }
-            } else {
-                log::warn!(
-                    "[BLE] Completion response too short to decrypt: {} bytes",
-                    comp_resp.len()
-                );
+                log::info!("[BLE] ThpEndRequest completed for reconnection");
             }
         }
 
