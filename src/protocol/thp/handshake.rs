@@ -474,6 +474,9 @@ mod tests {
             vec![],
             vec![comp, 0x12, 0x34],
             vec![comp, 0x12, 0x34, 0x00],
+            // Declares less than a CRC.
+            vec![comp, 0x12, 0x34, 0x00, 0x00],
+            vec![comp, 0x12, 0x34, 0x00, 0x03, 0, 0, 0],
             // Only a CRC.
             vec![comp, 0x12, 0x34, 0x00, 0x04, 0, 0, 0, 0],
             // Declares more than it holds.
